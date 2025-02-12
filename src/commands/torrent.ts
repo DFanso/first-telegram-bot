@@ -149,22 +149,7 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
         // Get the file from qBittorrent
         const fileInfo = await qbittorrent.downloadFile(torrent.hash);
         
-        try {
-            // Send the video file
-            await sendVideo(bot, chatId, fileInfo.path, true);
-            
-            // Clean up
-            if (fs.existsSync(fileInfo.path)) {
-                fs.unlinkSync(fileInfo.path);
-            }
-            await qbittorrent.deleteTorrent(torrent.hash, true);
-        } catch (error) {
-            // Clean up temp file even if sending fails
-            if (fs.existsSync(fileInfo.path)) {
-                fs.unlinkSync(fileInfo.path);
-            }
-            throw error;
-        }
+      //TODO: send file to user
     } catch (error) {
         console.error('Error handling completed torrent:', error);
         await bot.sendMessage(
