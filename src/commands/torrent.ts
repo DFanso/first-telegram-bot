@@ -109,16 +109,22 @@ async function monitorTorrentProgress(hash: string, bot: TelegramBot) {
         const torrent = torrents.find(t => t.hash === hash);
         if (!torrent) return;
 
+        const progressPercent = Math.round(torrent.progress * 100);
+        const progressBar = '█'.repeat(Math.floor(progressPercent / 5)) + '░'.repeat(20 - Math.floor(progressPercent / 5));
+
         // Update progress message
-        const progressText = `📥 Downloading: ${torrent.name}\n` +
-            `Progress: ${Math.round(torrent.progress * 100)}%\n` +
-            `Speed: ${formatSpeed(torrent.dlspeed)}\n` +
-            `Size: ${formatSize(torrent.size)}\n` +
-            `Status: ${torrent.state}`;
+        const progressText = `📥 Downloading: ${torrent.name}\n\n` +
+            `${progressBar} ${progressPercent}%\n\n` +
+            `⚡ Speed: ${formatSpeed(torrent.dlspeed)}\n` +
+            `💾 Size: ${formatSize(torrent.size)}\n` +
+            `🌱 Seeds: ${torrent.num_seeds}\n` +
+            `👥 Peers: ${torrent.num_leechs}\n` +
+            `📊 Status: ${torrent.state}`;
 
         await bot.editMessageText(progressText, {
             chat_id: progress.chatId,
-            message_id: progress.messageId
+            message_id: progress.messageId,
+            parse_mode: 'HTML'
         });
 
         // If download is complete
