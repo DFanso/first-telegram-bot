@@ -4,9 +4,9 @@ import { handleMessage } from './handlers/messageHandler';
 import { handleCallback } from './handlers/callbackHandler';
 import { commands } from './commands';
 
-const bot = new TelegramBot(config.token, { 
+const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { 
   polling: true,
-  baseApiUrl: config.baseApiUrl
+  baseApiUrl: config.LOCAL_API_URL
 });
 
 // Register bot commands
@@ -27,7 +27,7 @@ async function registerCommands() {
 // Initialize bot
 async function initBot() {
   await registerCommands();
-  console.log('Bot is running on local API server:', config.baseApiUrl);
+  console.log('Bot is running on local API server:', config.LOCAL_API_URL);
 }
 
 bot.on('message', async (msg) => {

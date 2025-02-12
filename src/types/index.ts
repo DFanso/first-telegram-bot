@@ -7,7 +7,12 @@ export interface Command {
 }
 
 export interface BotConfig {
-  token: string;
-  baseApiUrl: string;
-  localApiServer: boolean;
+  readonly TELEGRAM_BOT_TOKEN: string;
+  readonly LOCAL_API_URL: string;
+  readonly localApiServer: boolean;
+  readonly QBITTORRENT_HOST: string;
+  readonly QBITTORRENT_PORT: number;
+  readonly QBITTORRENT_USERNAME: string;
+  readonly QBITTORRENT_PASSWORD: string;
+  readonly QBITTORRENT_DOWNLOAD_PATH: string;
 } 

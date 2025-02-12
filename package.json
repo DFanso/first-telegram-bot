@@ -23,9 +23,13 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
+    "@types/form-data": "^2.5.2",
     "@types/uuid": "^10.0.0",
+    "axios": "^1.7.9",
     "dotenv": "^16.4.7",
+    "form-data": "^4.0.1",
     "node-telegram-bot-api": "^0.66.0",
+    "qbittorrent-api": "^1.0.0",
     "uuid": "^11.0.5"
   }
 }

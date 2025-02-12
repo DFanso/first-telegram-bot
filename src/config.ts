@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import { BotConfig } from '../types';
+import { BotConfig } from './types';
 
 dotenv.config();
 

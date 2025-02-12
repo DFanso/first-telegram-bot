@@ -1,11 +1,17 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { commands } from '../commands';
 import { handleDownloadInput } from '../commands/download';
+import { handleTorrentInput } from '../commands/torrent';
 
 export async function handleMessage(msg: TelegramBot.Message, bot: TelegramBot) {
     try {
         // First check if it's a download input
         if (await handleDownloadInput(msg, bot)) {
+            return;
+        }
+
+        // Then check if it's a torrent input
+        if (await handleTorrentInput(msg, bot)) {
             return;
         }
 
