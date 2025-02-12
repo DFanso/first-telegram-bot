@@ -1,6 +1,7 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { config } from './config';
 import { handleMessage } from './handlers/messageHandler';
+import { handleCallback } from './handlers/callbackHandler';
 
 const bot = new TelegramBot(config.token, { 
   polling: true,
@@ -12,6 +13,14 @@ bot.on('message', async (msg) => {
     await handleMessage(msg, bot);
   } catch (error) {
     console.error('Error handling message:', error);
+  }
+});
+
+bot.on('callback_query', async (callbackQuery) => {
+  try {
+    await handleCallback(callbackQuery, bot);
+  } catch (error) {
+    console.error('Error handling callback:', error);
   }
 });
 

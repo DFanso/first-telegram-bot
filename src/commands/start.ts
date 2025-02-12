@@ -22,7 +22,7 @@ export const startCommand: Command = {
     await bot.sendMessage(chatId, message);
 
     // send a video
-    await sendVideo(bot, chatId, path.join(__dirname, '../../assets/video.mp4'), true);
+    await sendVideo(bot, chatId, path.join(__dirname, '../../assets/videos/video.mp4'), true);
     await sendVideo(bot, chatId, 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4', false);
 
   }

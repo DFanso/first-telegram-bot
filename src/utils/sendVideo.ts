@@ -63,14 +63,16 @@ export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: str
         let lastProgress = -1;
         let lastUpdateTime = Date.now();
         let lastBytes = 0;
+
+        // Initialize progress message for both local and remote videos
+        const fileName = local ? path.basename(videoPath) : (videoPath.split('/').pop() || 'video.mp4');
+        const msg = await bot.sendMessage(chatId, '⬇️ Preparing...\n░░░░░░░░░░░░░░░░░░░░ 0%');
+        progressMessageId = msg.message_id;
         
         if (!local) {
             if (!videoPath) {
                 throw new Error('Video path is required for remote videos');
             }
-            const fileName = videoPath.split('/').pop() || 'video.mp4';
-            const msg = await bot.sendMessage(chatId, '⬇️ Preparing download...\n░░░░░░░░░░░░░░░░░░░░ 0%');
-            progressMessageId = msg.message_id;
             
             const tempPath = path.join(tmpdir(), `${uuidv4()}.mp4`);
             let downloadedBytes = 0;
@@ -123,14 +125,17 @@ export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: str
             
             for (let i = 0; i < parts.length; i++) {
                 const caption = `Part ${i + 1}/${parts.length}`;
+                const partFileName = `${fileName} (Part ${i + 1}/${parts.length})`;
                 if (progressMessageId) {
-                    await updateProgressMessage(bot, chatId, progressMessageId, 0, 'upload');
+                    await updateProgressMessage(bot, chatId, progressMessageId, 0, 'upload', {
+                        fileName: partFileName
+                    });
                 }
-                await sendVideoPart(bot, chatId, parts[i], caption, progressMessageId);
+                await sendVideoPart(bot, chatId, parts[i], caption, progressMessageId, partFileName);
                 fs.unlinkSync(parts[i]);
             }
         } else {
-            await sendVideoPart(bot, chatId, videoPath, 'Here is your video!', progressMessageId);
+            await sendVideoPart(bot, chatId, videoPath, 'Here is your video!', progressMessageId, fileName);
         }
 
         // Clean up progress message
@@ -151,7 +156,14 @@ export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: str
     }
 }
 
-async function sendVideoPart(bot: TelegramBot, chatId: number, videoPath: string, caption = 'Here is your video!', progressMessageId?: number) {
+async function sendVideoPart(
+    bot: TelegramBot, 
+    chatId: number, 
+    videoPath: string, 
+    caption = 'Here is your video!', 
+    progressMessageId?: number,
+    fileName?: string
+) {
     const videoStream = fs.createReadStream(videoPath);
     const stats = fs.statSync(videoPath);
     const fileSizeInBytes = stats.size;
@@ -159,11 +171,10 @@ async function sendVideoPart(bot: TelegramBot, chatId: number, videoPath: string
     let lastProgress = -1;
     let lastUpdateTime = Date.now();
     let lastBytes = 0;
-    const fileName = path.basename(videoPath);
 
     if (progressMessageId) {
         await updateProgressMessage(bot, chatId, progressMessageId, 0, 'upload', {
-            fileName,
+            fileName: fileName || path.basename(videoPath),
             totalSize: fileSizeInBytes,
             currentSize: 0
         });
@@ -184,7 +195,7 @@ async function sendVideoPart(bot: TelegramBot, chatId: number, videoPath: string
             lastBytes = uploadedBytes;
 
             await updateProgressMessage(bot, chatId, progressMessageId, progress, 'upload', {
-                fileName,
+                fileName: fileName || path.basename(videoPath),
                 totalSize: fileSizeInBytes,
                 currentSize: uploadedBytes,
                 speed
