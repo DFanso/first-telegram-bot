@@ -1,5 +1,6 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { config } from '../config';
+import path from 'path';
 
 interface QBitTorrent {
     hash: string;
@@ -86,14 +87,19 @@ class QBittorrentService {
             const params = new URLSearchParams();
             params.append('urls', magnetUrl);
             
+            // According to API docs, savepath should be absolute
             if (config.QBITTORRENT_DOWNLOAD_PATH) {
-                params.append('savepath', config.QBITTORRENT_DOWNLOAD_PATH);
+                const savePath = path.resolve(config.QBITTORRENT_DOWNLOAD_PATH);
+                console.log('Using save path:', savePath);
+                params.append('savepath', savePath);
             }
 
             // Optional parameters for better control
             params.append('paused', 'false');
             params.append('skip_checking', 'false');
             params.append('root_folder', 'true');
+            params.append('sequentialDownload', 'true'); // For streaming-friendly download
+            params.append('firstLastPiecePrio', 'true'); // For faster preview
 
             const response = await this.axiosInstance.post('/api/v2/torrents/add', params, {
                 headers: {
