@@ -12,9 +12,9 @@ export const startCommand: Command = {
 
     // make a beautiful message
     const message = `
-    Welcome to the bot!
-    I'm a bot that can help you with your tasks.
+    Welcome to the bot! I'm a bot that can help you with your tasks.
     `;
 
+    bot.sendMessage(chatId, message);
   }
-}; 
+};
