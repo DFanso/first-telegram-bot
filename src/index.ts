@@ -2,7 +2,10 @@ import TelegramBot from 'node-telegram-bot-api';
 import { config } from './config';
 import { handleMessage } from './handlers/messageHandler';
 
-const bot = new TelegramBot(config.token, { polling: true });
+const bot = new TelegramBot(config.token, { 
+  polling: true,
+  baseApiUrl: config.baseApiUrl
+});
 
 bot.on('message', async (msg) => {
   try {
@@ -12,4 +15,4 @@ bot.on('message', async (msg) => {
   }
 });
 
-console.log('Bot is running...');
+console.log('Bot is running on local API server:', config.baseApiUrl);

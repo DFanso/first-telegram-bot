@@ -8,4 +8,6 @@ export interface Command {
 
 export interface BotConfig {
   token: string;
+  baseApiUrl: string;
+  localApiServer: boolean;
 } 

@@ -41,7 +41,7 @@ export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: str
 
         const videoSize = await getVideoSize(videoPath);
         
-        if (parseFloat(videoSize) > 50) {
+        if (parseFloat(videoSize) > 2000) {
             const parts = await splitVideo(videoPath);
             console.log(`Splitting video into ${parts.length} parts`);
             
