@@ -20,17 +20,30 @@ export const startCommand: Command = {
     await bot.sendPhoto(chatId, image);
     await bot.sendMessage(chatId, message);
 
-    // send a local video
     try {
       const videoPath = path.join(__dirname, '../../assets/video.mp4');
       if (fs.existsSync(videoPath)) {
         const videoStream = fs.createReadStream(videoPath);
-        await bot.sendVideo(chatId, videoStream);
+        const stats = fs.statSync(videoPath);
+        const fileSizeInBytes = stats.size;
+        let uploadedBytes = 0;
+
+        // Create progress tracker
+        videoStream.on('data', (chunk) => {
+          uploadedBytes += chunk.length;
+          const progress = Math.round((uploadedBytes / fileSizeInBytes) * 100);
+          console.log(`Upload progress: ${progress}%`);
+        });
+
+        await bot.sendVideo(chatId, videoStream, {
+          caption: 'Here is your video!'
+        });
       } else {
         console.error('Video file not found:', videoPath);
       }
     } catch (error) {
       console.error('Error sending video:', error);
+      await bot.sendMessage(chatId, 'Sorry, there was an error sending the video.');
     }
   }
 }; 
