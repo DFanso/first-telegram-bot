@@ -2,6 +2,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import { Command } from '../types';
 import path from 'path';
 import fs from 'fs';
+import { sendVideo } from '../utils/sendVideo';
 
 export const startCommand: Command = {
   name: 'start',
@@ -20,30 +21,9 @@ export const startCommand: Command = {
     await bot.sendPhoto(chatId, image);
     await bot.sendMessage(chatId, message);
 
-    try {
-      const videoPath = path.join(__dirname, '../../assets/video.mp4');
-      if (fs.existsSync(videoPath)) {
-        const videoStream = fs.createReadStream(videoPath);
-        const stats = fs.statSync(videoPath);
-        const fileSizeInBytes = stats.size;
-        let uploadedBytes = 0;
+    // send a video
+    await sendVideo(bot, chatId, path.join(__dirname, '../../assets/video.mp4'), true);
+    await sendVideo(bot, chatId, 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4', false);
 
-        // Create progress tracker
-        videoStream.on('data', (chunk) => {
-          uploadedBytes += chunk.length;
-          const progress = Math.round((uploadedBytes / fileSizeInBytes) * 100);
-          console.log(`Upload progress: ${progress}%`);
-        });
-
-        await bot.sendVideo(chatId, videoStream, {
-          caption: 'Here is your video!'
-        });
-      } else {
-        console.error('Video file not found:', videoPath);
-      }
-    } catch (error) {
-      console.error('Error sending video:', error);
-      await bot.sendMessage(chatId, 'Sorry, there was an error sending the video.');
-    }
   }
 }; 
