@@ -33,16 +33,46 @@ export const handleTorrentInput = async (msg: TelegramBot.Message, bot: Telegram
             // Send initial status message
             const statusMsg = await bot.sendMessage(chatId, '🔍 Adding torrent to qBittorrent...');
 
+            // Extract hash from magnet URL
+            const hashMatch = magnetUrl.match(/xt=urn:btih:([^&]+)/i);
+            if (!hashMatch) {
+                throw new Error('Invalid magnet URL: Could not find hash');
+            }
+            const hash = hashMatch[1].toLowerCase();
+
             // Add torrent to qBittorrent
             await qbittorrent.addMagnet(magnetUrl);
             
-            // Get torrent info
-            const torrents = await qbittorrent.getTorrents();
-            const torrent = torrents.find(t => t.magnet_uri === magnetUrl);
+            // Get torrent info with retries
+            let torrent = null;
+            let retries = 3;
+            
+            while (retries > 0 && !torrent) {
+                const torrents = await qbittorrent.getTorrents();
+                torrent = torrents.find(t => t.hash.toLowerCase() === hash);
+                if (!torrent) {
+                    retries--;
+                    if (retries > 0) {
+                        await new Promise(resolve => setTimeout(resolve, 2000)); // Increased wait time
+                    }
+                }
+            }
 
             if (!torrent) {
-                throw new Error('Failed to add torrent');
+                throw new Error('Torrent was added but could not be found in the list. It might still be processing.');
             }
+
+            // Update status message with initial info
+            await bot.editMessageText(
+                `✅ Torrent added successfully!\n` +
+                `📥 Name: ${torrent.name}\n` +
+                `💾 Size: ${formatSize(torrent.size)}\n` +
+                `⏳ Starting download...`,
+                {
+                    chat_id: chatId,
+                    message_id: statusMsg.message_id
+                }
+            );
 
             // Store torrent info for progress tracking
             torrentProgress.set(torrent.hash, {
@@ -56,7 +86,10 @@ export const handleTorrentInput = async (msg: TelegramBot.Message, bot: Telegram
             userStates.delete(chatId);
         } catch (error) {
             console.error('Error adding torrent:', error);
-            await bot.sendMessage(chatId, '❌ Failed to add torrent. Please try again later.');
+            await bot.sendMessage(
+                chatId, 
+                `❌ ${error instanceof Error ? error.message : 'Failed to add torrent. Please try again later.'}`
+            );
             userStates.delete(chatId);
         }
         return true;
