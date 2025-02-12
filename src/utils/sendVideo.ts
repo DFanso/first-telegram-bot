@@ -9,6 +9,10 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
+// Constants
+const MAX_VIDEO_SIZE_MB = 2000; // 2000MB (2GB) limit for local API
+const MAX_SEGMENT_DURATION = 10000; 
+
 async function formatFileSize(bytes: number): Promise<string> {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -113,9 +117,9 @@ export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: str
 
         const videoSize = await getVideoSize(videoPath);
         
-        if (parseFloat(videoSize) > 2000) {
+        if (parseFloat(videoSize) > MAX_VIDEO_SIZE_MB) {
             const parts = await splitVideo(videoPath);
-            console.log(`Splitting video into ${parts.length} parts`);
+            console.log(`Splitting video into ${parts.length} parts (size: ${videoSize}MB, limit: ${MAX_VIDEO_SIZE_MB}MB)`);
             
             for (let i = 0; i < parts.length; i++) {
                 const caption = `Part ${i + 1}/${parts.length}`;
@@ -204,7 +208,7 @@ async function splitVideo(videoPath: string): Promise<string[]> {
     const baseName = path.join(outputDir, uuidv4());
     const duration = await getVideoDuration(videoPath);
     const parts: string[] = [];
-    const partDuration = Math.ceil(duration / Math.ceil(duration / 45)); // Split into ~45s segments
+    const partDuration = Math.ceil(duration / Math.ceil(duration / MAX_SEGMENT_DURATION)); // Split into segments
 
     for (let start = 0; start < duration; start += partDuration) {
         const outputPath = `${baseName}-part${parts.length + 1}.mp4`;
