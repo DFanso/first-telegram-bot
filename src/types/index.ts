@@ -15,4 +15,5 @@ export interface BotConfig {
   readonly QBITTORRENT_USERNAME: string;
   readonly QBITTORRENT_PASSWORD: string;
   readonly QBITTORRENT_DOWNLOAD_PATH: string;
+  readonly QBITTORRENT_NETWORK_PATH: string;
 } 

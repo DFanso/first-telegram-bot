@@ -257,15 +257,52 @@ class QBittorrentService {
     async downloadFile(hash: string): Promise<{ path: string; filename: string; }> {
         await this.ensureLoggedIn();
         try {
+            // Get torrent info to get the file path
+            const torrents = await this.getTorrents();
+            const torrent = torrents.find(t => t.hash === hash);
+            if (!torrent) {
+                throw new Error('Torrent not found');
+            }
+
             // Get file information
             const files = await this.getFiles(hash);
             if (!files || files.length === 0) {
                 throw new Error('No files found for this torrent');
             }
 
-            // For now, we'll handle the first file (most torrents have one main file)
+            // For now, we'll handle the first file
             const file = files[0];
-            console.log('Downloading file:', file.name);
+            console.log('Getting file:', file.name);
+
+            // Get the network path from config
+            const networkPath = config.QBITTORRENT_NETWORK_PATH;
+            if (!networkPath) {
+                throw new Error('Network path not configured. Please set QBITTORRENT_NETWORK_PATH in your .env file');
+            }
+
+            // Convert qBittorrent's local path to network path
+            const qbPath = config.QBITTORRENT_DOWNLOAD_PATH; // e.g., "D:\Download"
+            const relativePath = torrent.content_path ? 
+                path.relative(qbPath, torrent.content_path) : 
+                path.join(torrent.name, file.name);
+
+            // Construct the full network file path
+            let sourceFilePath = path.join(networkPath, relativePath);
+            console.log('Local qBittorrent path:', torrent.content_path);
+            console.log('Network file path:', sourceFilePath);
+
+            if (!fs.existsSync(sourceFilePath)) {
+                // Try alternative path construction if the first attempt fails
+                const altSourceFilePath = path.join(networkPath, torrent.name, file.name);
+                console.log('Trying alternative network path:', altSourceFilePath);
+                
+                if (!fs.existsSync(altSourceFilePath)) {
+                    throw new Error(`File not found at network path: ${sourceFilePath} or ${altSourceFilePath}`);
+                }
+                
+                // Use the alternative path if it exists
+                sourceFilePath = altSourceFilePath;
+            }
 
             // Create temp directory if it doesn't exist
             const tempDir = path.join(process.cwd(), 'temp');
@@ -273,26 +310,37 @@ class QBittorrentService {
                 fs.mkdirSync(tempDir, { recursive: true });
             }
 
-            // Download the file through WebUI
-            const response = await this.axiosInstance.get(`/downloads/${encodeURIComponent(file.name)}`, {
-                responseType: 'arraybuffer'
-            });
-
-            // Save the file to temp directory
+            // Create a temp file path with just the file name
             const tempFilePath = path.join(tempDir, file.name);
-            fs.writeFileSync(tempFilePath, response.data);
+            console.log('Temp file path:', tempFilePath);
+
+            // Ensure the temp directory for this file exists
+            const tempFileDir = path.dirname(tempFilePath);
+            if (!fs.existsSync(tempFileDir)) {
+                fs.mkdirSync(tempFileDir, { recursive: true });
+            }
+
+            // Copy file to temp directory
+            try {
+                fs.copyFileSync(sourceFilePath, tempFilePath);
+            } catch (error) {
+                if (error instanceof Error) {
+                    console.error('Copy error details:', {
+                        message: error.message,
+                        code: (error as any).code,
+                        errno: (error as any).errno
+                    });
+                    throw new Error(`Failed to copy file: ${error.message} (${(error as any).code})`);
+                }
+                throw error;
+            }
             
             return {
                 path: tempFilePath,
                 filename: file.name
             };
         } catch (error) {
-            if ((error as AxiosError)?.response?.status === 403) {
-                this.isLoggedIn = false;
-                await this.login();
-                return this.downloadFile(hash);
-            }
-            console.error('Failed to download file:', error);
+            console.error('Failed to get file:', error);
             throw error;
         }
     }

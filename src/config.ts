@@ -15,5 +15,6 @@ export const config: BotConfig = {
   QBITTORRENT_PORT: Number(process.env.QBITTORRENT_PORT) || 8080,
   QBITTORRENT_USERNAME: process.env.QBITTORRENT_USERNAME || 'admin',
   QBITTORRENT_PASSWORD: process.env.QBITTORRENT_PASSWORD || 'adminadmin',
-  QBITTORRENT_DOWNLOAD_PATH: process.env.QBITTORRENT_DOWNLOAD_PATH || './downloads'
+  QBITTORRENT_DOWNLOAD_PATH: process.env.QBITTORRENT_DOWNLOAD_PATH || './downloads',
+  QBITTORRENT_NETWORK_PATH: process.env.QBITTORRENT_NETWORK_PATH || 'G:\\Download'
 }; 
