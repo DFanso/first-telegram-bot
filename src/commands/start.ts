@@ -23,7 +23,7 @@ export const startCommand: Command = {
 
     // send a video
     await sendVideo(bot, chatId, path.join(__dirname, '../../assets/video.mp4'), true);
-    await sendVideo(bot, chatId, 'https://ddl.sinhalasub.net/AgADKx14401', false);
+    await sendVideo(bot, chatId, 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4', false);
 
   }
 }; 

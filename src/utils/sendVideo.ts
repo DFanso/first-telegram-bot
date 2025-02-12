@@ -9,13 +9,36 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
+async function updateProgressMessage(bot: TelegramBot, chatId: number, messageId: number, progress: number, stage: 'download' | 'upload') {
+    const status = stage === 'download' ? '⬇️ Downloading' : '⬆️ Uploading';
+    const progressBar = '█'.repeat(Math.floor(progress / 5)) + '░'.repeat(20 - Math.floor(progress / 5));
+    const text = `${status}...\n${progressBar} ${progress}%`;
+    
+    try {
+        await bot.editMessageText(text, {
+            chat_id: chatId,
+            message_id: messageId
+        });
+    } catch (error: any) {
+        // Ignore "message not modified" errors
+        if (!error.message?.includes('message is not modified')) {
+            console.error('Error updating progress:', error);
+        }
+    }
+}
+
 export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: string, local: boolean = true) {
     try {
+        let progressMessageId: number | undefined;
+        let lastProgress = -1;  // Track last progress to avoid duplicate updates
+        
         if (!local) {
             if (!videoPath) {
                 throw new Error('Video path is required for remote videos');
             }
-            // Download remote video first with progress
+            const msg = await bot.sendMessage(chatId, '⬇️ Preparing download...\n░░░░░░░░░░░░░░░░░░░░ 0%');
+            progressMessageId = msg.message_id;
+            
             const tempPath = path.join(tmpdir(), `${uuidv4()}.mp4`);
             let downloadedBytes = 0;
             let totalBytes = 0;
@@ -26,10 +49,13 @@ export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: str
                     }
                     const fileStream = fs.createWriteStream(tempPath);
                     res.pipe(fileStream);
-                    res.on('data', chunk => {
+                    res.on('data', async chunk => {
                         downloadedBytes += chunk.length;
                         const progress = Math.round((downloadedBytes / totalBytes) * 100);
-                        console.log(`Download progress: ${progress}%`);
+                        if (progressMessageId && progress % 5 === 0 && progress !== lastProgress) {
+                            lastProgress = progress;
+                            await updateProgressMessage(bot, chatId, progressMessageId, progress, 'download');
+                        }
                     });
                     fileStream.on('finish', () => resolve());
                     fileStream.on('error', reject);
@@ -37,6 +63,7 @@ export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: str
             });
             videoPath = tempPath;
             local = true;
+            lastProgress = -1; // Reset for upload progress
         }
 
         const videoSize = await getVideoSize(videoPath);
@@ -45,18 +72,27 @@ export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: str
             const parts = await splitVideo(videoPath);
             console.log(`Splitting video into ${parts.length} parts`);
             
-            // Send each part
             for (let i = 0; i < parts.length; i++) {
                 const caption = `Part ${i + 1}/${parts.length}`;
-                await sendVideoPart(bot, chatId, parts[i], caption);
-                // Cleanup part file
+                if (progressMessageId) {
+                    await updateProgressMessage(bot, chatId, progressMessageId, 0, 'upload');
+                }
+                await sendVideoPart(bot, chatId, parts[i], caption, progressMessageId);
                 fs.unlinkSync(parts[i]);
             }
         } else {
-            await sendVideoPart(bot, chatId, videoPath);
+            await sendVideoPart(bot, chatId, videoPath, 'Here is your video!', progressMessageId);
         }
 
-        // Cleanup temp file if it was a remote video
+        // Clean up progress message
+        if (progressMessageId) {
+            try {
+                await bot.deleteMessage(chatId, progressMessageId);
+            } catch (error) {
+                console.error('Error deleting progress message:', error);
+            }
+        }
+
         if (videoPath.includes(tmpdir())) {
             fs.unlinkSync(videoPath);
         }
@@ -66,16 +102,24 @@ export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: str
     }
 }
 
-async function sendVideoPart(bot: TelegramBot, chatId: number, videoPath: string, caption = 'Here is your video!') {
+async function sendVideoPart(bot: TelegramBot, chatId: number, videoPath: string, caption = 'Here is your video!', progressMessageId?: number) {
     const videoStream = fs.createReadStream(videoPath);
     const stats = fs.statSync(videoPath);
     const fileSizeInBytes = stats.size;
     let uploadedBytes = 0;
+    let lastProgress = -1;
 
-    videoStream.on('data', (chunk: string | Buffer) => {
+    if (progressMessageId) {
+        await updateProgressMessage(bot, chatId, progressMessageId, 0, 'upload');
+    }
+
+    videoStream.on('data', async (chunk: string | Buffer) => {
         uploadedBytes += Buffer.from(chunk).length;
         const progress = Math.round((uploadedBytes / fileSizeInBytes) * 100);
-        console.log(`Upload progress: ${progress}%`);
+        if (progressMessageId && progress % 5 === 0 && progress !== lastProgress) {
+            lastProgress = progress;
+            await updateProgressMessage(bot, chatId, progressMessageId, progress, 'upload');
+        }
     });
 
     await bot.sendVideo(chatId, videoStream, { caption });
