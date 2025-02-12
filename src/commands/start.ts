@@ -1,8 +1,6 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { Command } from '../types';
-import path from 'path';
-import fs from 'fs';
-import { sendVideo } from '../utils/sendVideo';
+
 
 export const startCommand: Command = {
   name: 'start',
