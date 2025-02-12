@@ -1,18 +1,15 @@
 import TelegramBot from 'node-telegram-bot-api';
-import dotenv from 'dotenv';
+import { config } from './config';
+import { handleMessage } from './handlers/messageHandler';
 
-dotenv.config();
+const bot = new TelegramBot(config.token, { polling: true });
 
-const token = process.env.TELEGRAM_BOT_TOKEN;
-
-if (!token) {
-  throw new Error('TELEGRAM_BOT_TOKEN is not defined');
-}
-
-const bot = new TelegramBot(token, { polling: true });
-
-bot.on('message', (msg) => {
-  const chatId = msg.chat.id;
-
-  bot.sendMessage(chatId, 'Hello, world!');
+bot.on('message', async (msg) => {
+  try {
+    await handleMessage(msg, bot);
+  } catch (error) {
+    console.error('Error handling message:', error);
+  }
 });
+
+console.log('Bot is running...');
