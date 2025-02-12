@@ -1,6 +1,7 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { config } from '../config';
 import path from 'path';
+import fs from 'fs';
 
 interface QBitTorrent {
     hash: string;
@@ -225,6 +226,73 @@ class QBittorrentService {
                 return this.resumeTorrent(hash);
             }
             console.error('Failed to resume torrent:', error);
+            throw error;
+        }
+    }
+
+    async getFiles(hash: string): Promise<{ name: string; size: number; progress: number; availability: number; url: string; }[]> {
+        await this.ensureLoggedIn();
+        try {
+            console.log('Getting file information from QBittorrent...');
+            const response = await this.axiosInstance.get('/api/v2/torrents/files', {
+                params: { hash }
+            });
+            
+            // Map the files and create download URLs with proper encoding
+            return response.data.map((file: any) => ({
+                ...file,
+                url: `${this.baseUrl}/downloads/${encodeURIComponent(file.name)}`
+            }));
+        } catch (error) {
+            if ((error as AxiosError)?.response?.status === 403) {
+                this.isLoggedIn = false;
+                await this.login();
+                return this.getFiles(hash);
+            }
+            console.error('Failed to get files:', error);
+            throw error;
+        }
+    }
+
+    async downloadFile(hash: string): Promise<{ path: string; filename: string; }> {
+        await this.ensureLoggedIn();
+        try {
+            // Get file information
+            const files = await this.getFiles(hash);
+            if (!files || files.length === 0) {
+                throw new Error('No files found for this torrent');
+            }
+
+            // For now, we'll handle the first file (most torrents have one main file)
+            const file = files[0];
+            console.log('Downloading file:', file.name);
+
+            // Create temp directory if it doesn't exist
+            const tempDir = path.join(process.cwd(), 'temp');
+            if (!fs.existsSync(tempDir)) {
+                fs.mkdirSync(tempDir, { recursive: true });
+            }
+
+            // Download the file through WebUI
+            const response = await this.axiosInstance.get(`/downloads/${encodeURIComponent(file.name)}`, {
+                responseType: 'arraybuffer'
+            });
+
+            // Save the file to temp directory
+            const tempFilePath = path.join(tempDir, file.name);
+            fs.writeFileSync(tempFilePath, response.data);
+            
+            return {
+                path: tempFilePath,
+                filename: file.name
+            };
+        } catch (error) {
+            if ((error as AxiosError)?.response?.status === 403) {
+                this.isLoggedIn = false;
+                await this.login();
+                return this.downloadFile(hash);
+            }
+            console.error('Failed to download file:', error);
             throw error;
         }
     }

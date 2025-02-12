@@ -144,38 +144,34 @@ async function monitorTorrentProgress(hash: string, bot: TelegramBot) {
 // Handle completed torrent
 async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: number) {
     try {
-        // According to API docs, content_path is the absolute path to the torrent content
-        // save_path is the absolute path to the download folder
-        let filePath: string;
+        await bot.sendMessage(chatId, '✅ Download complete! Getting file from qBittorrent...');
         
-        if (torrent.content_path) {
-            console.log('Using content_path:', torrent.content_path);
-            filePath = torrent.content_path;
-        } else if (torrent.save_path) {
-            console.log('Using save_path + name:', torrent.save_path, torrent.name);
-            filePath = path.join(torrent.save_path, torrent.name);
-        } else {
-            console.log('Using default download path + name:', config.QBITTORRENT_DOWNLOAD_PATH, torrent.name);
-            filePath = path.join(path.resolve(config.QBITTORRENT_DOWNLOAD_PATH), torrent.name);
+        // Get the file from qBittorrent
+        const fileInfo = await qbittorrent.downloadFile(torrent.hash);
+        
+        try {
+            // Send the video file
+            await sendVideo(bot, chatId, fileInfo.path, true);
+            
+            // Clean up
+            if (fs.existsSync(fileInfo.path)) {
+                fs.unlinkSync(fileInfo.path);
+            }
+            await qbittorrent.deleteTorrent(torrent.hash, true);
+        } catch (error) {
+            // Clean up temp file even if sending fails
+            if (fs.existsSync(fileInfo.path)) {
+                fs.unlinkSync(fileInfo.path);
+            }
+            throw error;
         }
-
-        console.log('Final file path:', filePath);
-        
-        // Check if file exists
-        if (!fs.existsSync(filePath)) {
-            throw new Error(`File not found at path: ${filePath}`);
-        }
-
-        await bot.sendMessage(chatId, '✅ Download complete! Sending file...');
-        
-        // Send the video file
-        await sendVideo(bot, chatId, filePath, true);
-
-        // Clean up
-        await qbittorrent.deleteTorrent(torrent.hash, true);
     } catch (error) {
         console.error('Error handling completed torrent:', error);
-        await bot.sendMessage(chatId, `❌ Failed to send the downloaded file: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        await bot.sendMessage(
+            chatId, 
+            `❌ Failed to send the downloaded file: ${error instanceof Error ? error.message : 'Unknown error'}\n` +
+            'The file is still available in qBittorrent if you want to try again.'
+        );
     }
 }
 

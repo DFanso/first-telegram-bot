@@ -26,6 +26,13 @@ export const handleDownloadInput = async (msg: TelegramBot.Message, bot: Telegra
         }
 
         try {
+            // Check if it's a magnet link
+            if (url.startsWith('magnet:')) {
+                await bot.sendMessage(chatId, '⚠️ Please use /torrent command for magnet links instead.');
+                userStates.delete(chatId);
+                return true;
+            }
+            
             // Validate URL
             new URL(url);
             
