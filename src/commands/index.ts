@@ -3,11 +3,13 @@ import { startCommand } from './start';
 import { videosCommand } from './videos';
 import { helpCommand } from './help';
 import { infoCommand } from './info';
+import { downloadCommand } from './download';
 
 export const commands: Command[] = [
   startCommand,
   helpCommand,
   videosCommand,
-  infoCommand
+  infoCommand,
+  downloadCommand
   // Add more commands here
 ]; 

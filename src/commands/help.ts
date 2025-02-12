@@ -15,6 +15,8 @@ export const helpCommand: Command = {
         
         helpMessage += '\n💡 *Tips:*\n';
         helpMessage += '• Use /videos to browse and select available videos\n';
+        helpMessage += '• Use /info to see detailed video information\n';
+        helpMessage += '• Use /download <url> to download and receive videos from URLs\n';
         helpMessage += '• Videos larger than 2GB will be automatically split\n';
         helpMessage += '• Progress tracking is available for both uploads and downloads';
 
