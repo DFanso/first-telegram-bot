@@ -9,18 +9,44 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
-async function updateProgressMessage(bot: TelegramBot, chatId: number, messageId: number, progress: number, stage: 'download' | 'upload') {
+async function formatFileSize(bytes: number): Promise<string> {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+async function updateProgressMessage(bot: TelegramBot, chatId: number, messageId: number, progress: number, stage: 'download' | 'upload', details: { 
+    fileName?: string;
+    totalSize?: number;
+    currentSize?: number;
+    speed?: number;
+} = {}) {
     const status = stage === 'download' ? '⬇️ Downloading' : '⬆️ Uploading';
     const progressBar = '█'.repeat(Math.floor(progress / 5)) + '░'.repeat(20 - Math.floor(progress / 5));
-    const text = `${status}...\n${progressBar} ${progress}%`;
+    
+    let text = `${status}`;
+    if (details.fileName) {
+        text += `\n📁 File: ${details.fileName}`;
+    }
+    if (details.totalSize) {
+        text += `\n💾 Size: ${await formatFileSize(details.totalSize)}`;
+    }
+    if (details.currentSize && details.totalSize) {
+        text += `\n📊 Progress: ${await formatFileSize(details.currentSize)} of ${await formatFileSize(details.totalSize)}`;
+    }
+    if (details.speed) {
+        text += `\n⚡ Speed: ${await formatFileSize(details.speed)}/s`;
+    }
+    text += `\n\n${progressBar} ${progress}%`;
     
     try {
         await bot.editMessageText(text, {
             chat_id: chatId,
-            message_id: messageId
+            message_id: messageId,
+            parse_mode: 'HTML'
         });
     } catch (error: any) {
-        // Ignore "message not modified" errors
         if (!error.message?.includes('message is not modified')) {
             console.error('Error updating progress:', error);
         }
@@ -30,12 +56,15 @@ async function updateProgressMessage(bot: TelegramBot, chatId: number, messageId
 export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: string, local: boolean = true) {
     try {
         let progressMessageId: number | undefined;
-        let lastProgress = -1;  // Track last progress to avoid duplicate updates
+        let lastProgress = -1;
+        let lastUpdateTime = Date.now();
+        let lastBytes = 0;
         
         if (!local) {
             if (!videoPath) {
                 throw new Error('Video path is required for remote videos');
             }
+            const fileName = videoPath.split('/').pop() || 'video.mp4';
             const msg = await bot.sendMessage(chatId, '⬇️ Preparing download...\n░░░░░░░░░░░░░░░░░░░░ 0%');
             progressMessageId = msg.message_id;
             
@@ -52,9 +81,23 @@ export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: str
                     res.on('data', async chunk => {
                         downloadedBytes += chunk.length;
                         const progress = Math.round((downloadedBytes / totalBytes) * 100);
+                        const now = Date.now();
+                        const timeDiff = now - lastUpdateTime;
+                        
                         if (progressMessageId && progress % 5 === 0 && progress !== lastProgress) {
+                            const byteDiff = downloadedBytes - lastBytes;
+                            const speed = byteDiff / (timeDiff / 1000);
+                            
                             lastProgress = progress;
-                            await updateProgressMessage(bot, chatId, progressMessageId, progress, 'download');
+                            lastUpdateTime = now;
+                            lastBytes = downloadedBytes;
+                            
+                            await updateProgressMessage(bot, chatId, progressMessageId, progress, 'download', {
+                                fileName,
+                                totalSize: totalBytes,
+                                currentSize: downloadedBytes,
+                                speed
+                            });
                         }
                     });
                     fileStream.on('finish', () => resolve());
@@ -63,7 +106,9 @@ export async function sendVideo(bot: TelegramBot, chatId: number, videoPath: str
             });
             videoPath = tempPath;
             local = true;
-            lastProgress = -1; // Reset for upload progress
+            lastProgress = -1;
+            lastUpdateTime = Date.now();
+            lastBytes = 0;
         }
 
         const videoSize = await getVideoSize(videoPath);
@@ -108,17 +153,38 @@ async function sendVideoPart(bot: TelegramBot, chatId: number, videoPath: string
     const fileSizeInBytes = stats.size;
     let uploadedBytes = 0;
     let lastProgress = -1;
+    let lastUpdateTime = Date.now();
+    let lastBytes = 0;
+    const fileName = path.basename(videoPath);
 
     if (progressMessageId) {
-        await updateProgressMessage(bot, chatId, progressMessageId, 0, 'upload');
+        await updateProgressMessage(bot, chatId, progressMessageId, 0, 'upload', {
+            fileName,
+            totalSize: fileSizeInBytes,
+            currentSize: 0
+        });
     }
 
     videoStream.on('data', async (chunk: string | Buffer) => {
         uploadedBytes += Buffer.from(chunk).length;
         const progress = Math.round((uploadedBytes / fileSizeInBytes) * 100);
+        const now = Date.now();
+        const timeDiff = now - lastUpdateTime;
+
         if (progressMessageId && progress % 5 === 0 && progress !== lastProgress) {
+            const byteDiff = uploadedBytes - lastBytes;
+            const speed = byteDiff / (timeDiff / 1000);
+            
             lastProgress = progress;
-            await updateProgressMessage(bot, chatId, progressMessageId, progress, 'upload');
+            lastUpdateTime = now;
+            lastBytes = uploadedBytes;
+
+            await updateProgressMessage(bot, chatId, progressMessageId, progress, 'upload', {
+                fileName,
+                totalSize: fileSizeInBytes,
+                currentSize: uploadedBytes,
+                speed
+            });
         }
     });
 
