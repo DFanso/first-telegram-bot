@@ -154,42 +154,18 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
         // Get the file from qBittorrent
         const fileInfo = await qbittorrent.downloadFile(torrent.hash);
         
-        // Convert network path to local path if needed and normalize it
-        let sourceFilePath = fileInfo.path;
-        if (config.QBITTORRENT_NETWORK_PATH && config.QBITTORRENT_DOWNLOAD_PATH) {
-            sourceFilePath = sourceFilePath.replace(
-                config.QBITTORRENT_NETWORK_PATH,
-                path.resolve(config.QBITTORRENT_DOWNLOAD_PATH)
-            );
-        }
-        sourceFilePath = path.normalize(sourceFilePath);
-
-        // Sanitize file paths and handle Windows-specific issues
-        const sanitizedSourcePath = decodeURIComponent(sourceFilePath)
-            .replace(/[\u{1F300}-\u{1F9FF}]/gu, '')
-            .replace(/[<>:"/\\|?*]/g, '_') // Replace Windows-invalid characters
-            .trim();
-        
         // Verify file exists and is accessible
         try {
-            await fs.promises.access(sanitizedSourcePath, fs.constants.R_OK);
+            await fs.promises.access(fileInfo.path, fs.constants.R_OK);
         } catch (accessError) {
             console.error('File access error:', accessError);
-            throw new Error(`Cannot access file at path: ${sanitizedSourcePath}. Please check file permissions.`);
+            throw new Error(`Cannot access file at path: ${fileInfo.path}. Please check file permissions.`);
         }
 
-        const fileName = path.basename(sanitizedSourcePath)
-            .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Remove emojis
-            .replace(/[<>:"/\\|?*]/g, '_') // Replace Windows-invalid characters
-            .replace(/[^\w\s\-\.]/g, '_') // Replace other special chars with underscore
-            .trim();
-        
         // Create temp directory in user's temp folder instead of project directory
         const tempDir = path.join(process.env.TEMP || process.env.TMP || path.join(process.cwd(), 'temp'), 'telegram-bot', Date.now().toString());
         try {
-            if (!fs.existsSync(tempDir)) {
-                await fs.promises.mkdir(tempDir, { recursive: true });
-            }
+            await fs.promises.mkdir(tempDir, { recursive: true });
             // Ensure we have write permissions
             await fs.promises.access(tempDir, fs.constants.W_OK);
         } catch (mkdirError) {
@@ -198,7 +174,7 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
         }
 
         // Get file size
-        const stats = await fs.promises.stat(sanitizedSourcePath);
+        const stats = await fs.promises.stat(fileInfo.path);
         const fileSize = stats.size;
         const PART_SIZE = 2 * 1024 * 1024 * 1024; // 2GB in bytes
 
@@ -315,10 +291,10 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                     });
                 });
             `, { eval: true, workerData: { 
-                sourceFilePath: sanitizedSourcePath, 
+                sourceFilePath: fileInfo.path, 
                 tempDir, 
                 PART_SIZE, 
-                fileName 
+                fileName: fileInfo.filename 
             }});
 
             // Handle worker messages
@@ -362,7 +338,7 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             // For files under 2GB, compress and send as single file
             await bot.sendMessage(chatId, '📦 Compressing file...');
             
-            const zipPath = path.join(tempDir, `${fileName}.zip`);
+            const zipPath = path.join(tempDir, `${fileInfo.filename}.zip`);
             const output = createWriteStream(zipPath, { mode: 0o666 });
             const archive = archiver('zip', { zlib: { level: 9 } });
             
@@ -371,13 +347,13 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             });
 
             archive.pipe(output);
-            archive.file(sanitizedSourcePath, { name: fileName });
+            archive.file(fileInfo.path, { name: fileInfo.filename });
             
             await archive.finalize();
             
             await bot.sendMessage(chatId, '📤 Sending compressed file...');
             await bot.sendDocument(chatId, zipPath, {
-                caption: `${fileName}.zip`
+                caption: `${fileInfo.filename}.zip`
             });
             
             // Clean up

@@ -276,39 +276,28 @@ class QBittorrentService {
             console.log('Getting file:', file.name);
 
             // Construct source file path
-            let sourceFilePath = path.join(torrent.save_path, file.name);
-            console.log('Local qBittorrent path:', torrent.save_path);
-            console.log('Network file path:', sourceFilePath);
+            const sourceFilePath = path.join(torrent.save_path, torrent.name, file.name);
+            console.log('Source file path:', sourceFilePath);
 
-            // Check if file exists at the source path
+            // Check if file exists
             if (!fs.existsSync(sourceFilePath)) {
-                // Try alternative path construction
-                const altSourceFilePath = path.join(torrent.save_path, path.basename(file.name));
-                console.log('Trying alternative path:', altSourceFilePath);
-                
-                if (!fs.existsSync(altSourceFilePath)) {
-                    throw new Error(`File not found at network path: ${sourceFilePath} or ${altSourceFilePath}`);
-                }
-                
-                sourceFilePath = altSourceFilePath;
+                throw new Error(`File not found at path: ${sourceFilePath}`);
             }
 
             // Create temp directory if it doesn't exist
             const tempDir = path.join(process.cwd(), 'temp');
             if (!fs.existsSync(tempDir)) {
-                fs.mkdirSync(tempDir, { recursive: true });
+                await fs.promises.mkdir(tempDir, { recursive: true });
             }
 
-            // Create a temp file path that preserves the directory structure
-            const relativePath = path.relative(torrent.save_path, sourceFilePath);
-            const tempFilePath = path.join(tempDir, relativePath);
+            // Create a temp file path with sanitized name
+            const sanitizedName = path.basename(file.name)
+                .replace(/[<>:"/\\|?*]/g, '_') // Replace Windows-invalid characters
+                .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Remove emojis
+                .trim();
+
+            const tempFilePath = path.join(tempDir, sanitizedName);
             console.log('Temp file path:', tempFilePath);
-
-            // Ensure the temp directory for this file exists
-            const tempFileDir = path.dirname(tempFilePath);
-            if (!fs.existsSync(tempFileDir)) {
-                fs.mkdirSync(tempFileDir, { recursive: true });
-            }
 
             // Copy file to temp directory using streams for better handling
             try {
@@ -317,19 +306,28 @@ class QBittorrentService {
                     const writeStream = fs.createWriteStream(tempFilePath);
 
                     readStream.on('error', (error) => {
+                        readStream.destroy();
+                        writeStream.destroy();
                         reject(new Error(`Failed to read file: ${error.message}`));
                     });
 
                     writeStream.on('error', (error) => {
+                        readStream.destroy();
+                        writeStream.destroy();
                         reject(new Error(`Failed to write file: ${error.message}`));
                     });
 
-                    writeStream.on('close', () => {
+                    writeStream.on('finish', () => {
                         resolve();
                     });
 
                     readStream.pipe(writeStream);
                 });
+
+                return {
+                    path: tempFilePath,
+                    filename: sanitizedName
+                };
             } catch (error) {
                 if (error instanceof Error) {
                     console.error('Copy error details:', {
@@ -341,11 +339,6 @@ class QBittorrentService {
                 }
                 throw error;
             }
-            
-            return {
-                path: tempFilePath,
-                filename: file.name
-            };
         } catch (error) {
             console.error('Failed to get file:', error);
             throw error;
