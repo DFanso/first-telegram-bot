@@ -254,53 +254,42 @@ class QBittorrentService {
         }
     }
 
-    async downloadFile(hash: string): Promise<{ path: string; filename: string; }> {
-        await this.ensureLoggedIn();
+    async downloadFile(hash: string): Promise<{ path: string; filename: string }> {
         try {
-            // Get torrent info to get the file path
+            await this.ensureLoggedIn();
+            
+            // Get torrent info
             const torrents = await this.getTorrents();
             const torrent = torrents.find(t => t.hash === hash);
             if (!torrent) {
                 throw new Error('Torrent not found');
             }
 
-            // Get file information
+            // Get file list
             const files = await this.getFiles(hash);
             if (!files || files.length === 0) {
-                throw new Error('No files found for this torrent');
+                throw new Error('No files found in torrent');
             }
 
             // For now, we'll handle the first file
             const file = files[0];
             console.log('Getting file:', file.name);
 
-            // Get the network path from config
-            const networkPath = config.QBITTORRENT_NETWORK_PATH;
-            if (!networkPath) {
-                throw new Error('Network path not configured. Please set QBITTORRENT_NETWORK_PATH in your .env file');
-            }
-
-            // Convert qBittorrent's local path to network path
-            const qbPath = config.QBITTORRENT_DOWNLOAD_PATH; // e.g., "D:\Download"
-            const relativePath = torrent.content_path ? 
-                path.relative(qbPath, torrent.content_path) : 
-                path.join(torrent.name, file.name);
-
-            // Construct the full network file path
-            let sourceFilePath = path.join(networkPath, relativePath);
-            console.log('Local qBittorrent path:', torrent.content_path);
+            // Construct source file path
+            let sourceFilePath = path.join(torrent.save_path, file.name);
+            console.log('Local qBittorrent path:', torrent.save_path);
             console.log('Network file path:', sourceFilePath);
 
+            // Check if file exists at the source path
             if (!fs.existsSync(sourceFilePath)) {
-                // Try alternative path construction if the first attempt fails
-                const altSourceFilePath = path.join(networkPath, torrent.name, file.name);
-                console.log('Trying alternative network path:', altSourceFilePath);
+                // Try alternative path construction
+                const altSourceFilePath = path.join(torrent.save_path, path.basename(file.name));
+                console.log('Trying alternative path:', altSourceFilePath);
                 
                 if (!fs.existsSync(altSourceFilePath)) {
                     throw new Error(`File not found at network path: ${sourceFilePath} or ${altSourceFilePath}`);
                 }
                 
-                // Use the alternative path if it exists
                 sourceFilePath = altSourceFilePath;
             }
 
@@ -310,8 +299,9 @@ class QBittorrentService {
                 fs.mkdirSync(tempDir, { recursive: true });
             }
 
-            // Create a temp file path with just the file name
-            const tempFilePath = path.join(tempDir, file.name);
+            // Create a temp file path that preserves the directory structure
+            const relativePath = path.relative(torrent.save_path, sourceFilePath);
+            const tempFilePath = path.join(tempDir, relativePath);
             console.log('Temp file path:', tempFilePath);
 
             // Ensure the temp directory for this file exists
@@ -320,9 +310,26 @@ class QBittorrentService {
                 fs.mkdirSync(tempFileDir, { recursive: true });
             }
 
-            // Copy file to temp directory
+            // Copy file to temp directory using streams for better handling
             try {
-                fs.copyFileSync(sourceFilePath, tempFilePath);
+                await new Promise<void>((resolve, reject) => {
+                    const readStream = fs.createReadStream(sourceFilePath);
+                    const writeStream = fs.createWriteStream(tempFilePath);
+
+                    readStream.on('error', (error) => {
+                        reject(new Error(`Failed to read file: ${error.message}`));
+                    });
+
+                    writeStream.on('error', (error) => {
+                        reject(new Error(`Failed to write file: ${error.message}`));
+                    });
+
+                    writeStream.on('close', () => {
+                        resolve();
+                    });
+
+                    readStream.pipe(writeStream);
+                });
             } catch (error) {
                 if (error instanceof Error) {
                     console.error('Copy error details:', {
