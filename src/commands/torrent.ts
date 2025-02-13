@@ -5,6 +5,11 @@ import path from 'path';
 import { sendVideo } from '../utils/sendVideo';
 import { qbittorrent } from '../services/qbittorrent';
 import fs from 'fs';
+import { promisify } from 'util';
+import archiver from 'archiver';
+import { pipeline } from 'stream/promises';
+import { createReadStream, createWriteStream } from 'fs';
+import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 
 // Store user states and torrent info
 const userStates = new Map<number, 'waiting_for_magnet'>();
@@ -144,12 +149,124 @@ async function monitorTorrentProgress(hash: string, bot: TelegramBot) {
 // Handle completed torrent
 async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: number) {
     try {
-        await bot.sendMessage(chatId, '✅ Download complete! Getting file from qBittorrent...');
+        await bot.sendMessage(chatId, '✅ Download complete! Processing file...');
         
         // Get the file from qBittorrent
         const fileInfo = await qbittorrent.downloadFile(torrent.hash);
+        const sourceFilePath = fileInfo.path;
+        const fileName = path.basename(sourceFilePath);
         
-      //TODO: send file to user
+        // Create temp directory for processing if it doesn't exist
+        const tempDir = path.join(process.cwd(), 'temp');
+        if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+        }
+
+        // Get file size
+        const stats = await fs.promises.stat(sourceFilePath);
+        const fileSize = stats.size;
+        const PART_SIZE = 2 * 1024 * 1024 * 1024; // 2GB in bytes
+
+        // If file is larger than 2GB, split into parts
+        if (fileSize > PART_SIZE) {
+            await bot.sendMessage(chatId, '📦 File is larger than 2GB. Splitting and compressing into parts...');
+            
+            // Create a worker for compression and splitting
+            const worker = new Worker(`
+                const { parentPort, workerData } = require('worker_threads');
+                const fs = require('fs');
+                const archiver = require('archiver');
+                const path = require('path');
+
+                async function compressAndSplit() {
+                    const { sourceFilePath, tempDir, PART_SIZE, fileName } = workerData;
+                    const parts = [];
+                    let partNum = 1;
+                    let processedBytes = 0;
+
+                    while (processedBytes < fs.statSync(sourceFilePath).size) {
+                        const archive = archiver('zip', { zlib: { level: 9 } });
+                        const partPath = path.join(tempDir, \`\${fileName}.part\${partNum}.zip\`);
+                        const output = fs.createWriteStream(partPath);
+
+                        archive.pipe(output);
+
+                        const currentPartSize = Math.min(PART_SIZE, fs.statSync(sourceFilePath).size - processedBytes);
+                        archive.append(fs.createReadStream(sourceFilePath, {
+                            start: processedBytes,
+                            end: processedBytes + currentPartSize - 1
+                        }), { name: fileName });
+
+                        await archive.finalize();
+                        parts.push(partPath);
+                        processedBytes += currentPartSize;
+                        partNum++;
+                        
+                        parentPort.postMessage({ 
+                            type: 'progress', 
+                            progress: (processedBytes / fs.statSync(sourceFilePath).size) * 100 
+                        });
+                    }
+
+                    parentPort.postMessage({ type: 'complete', parts });
+                }
+
+                compressAndSplit().catch(error => {
+                    parentPort.postMessage({ type: 'error', error: error.message });
+                });
+            `, { eval: true, workerData: { sourceFilePath, tempDir, PART_SIZE, fileName } });
+
+            // Handle worker messages
+            worker.on('message', async (message) => {
+                if (message.type === 'progress') {
+                    await bot.sendMessage(chatId, `📦 Compression progress: ${Math.round(message.progress)}%`);
+                } else if (message.type === 'complete') {
+                    const parts = message.parts;
+                    await bot.sendMessage(chatId, `✅ File split and compressed into ${parts.length} parts. Sending files...`);
+                    
+                    // Send each part
+                    for (let i = 0; i < parts.length; i++) {
+                        const partPath = parts[i];
+                        await bot.sendDocument(chatId, partPath, {
+                            caption: `Part ${i + 1} of ${parts.length}: ${path.basename(partPath)}`
+                        });
+                        // Clean up part file after sending
+                        fs.unlinkSync(partPath);
+                    }
+                    
+                    await bot.sendMessage(chatId, '✅ All parts sent successfully!');
+                } else if (message.type === 'error') {
+                    throw new Error(message.error);
+                }
+            });
+        } else {
+            // For files under 2GB, compress and send as single file
+            await bot.sendMessage(chatId, '📦 Compressing file...');
+            
+            const zipPath = path.join(tempDir, `${fileName}.zip`);
+            const output = createWriteStream(zipPath);
+            const archive = archiver('zip', { zlib: { level: 9 } });
+            
+            archive.pipe(output);
+            archive.file(sourceFilePath, { name: fileName });
+            
+            await archive.finalize();
+            
+            await bot.sendMessage(chatId, '📤 Sending compressed file...');
+            await bot.sendDocument(chatId, zipPath, {
+                caption: `${fileName}.zip`
+            });
+            
+            // Clean up
+            fs.unlinkSync(zipPath);
+        }
+
+        // Clean up original file if needed
+        if (fs.existsSync(sourceFilePath)) {
+            fs.unlinkSync(sourceFilePath);
+        }
+
+        await bot.sendMessage(chatId, '✅ File transfer completed successfully!');
     } catch (error) {
         console.error('Error handling completed torrent:', error);
         await bot.sendMessage(
