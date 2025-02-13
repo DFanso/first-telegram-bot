@@ -201,12 +201,13 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             throw new Error('No accessible files found in torrent');
         }
 
-        const PART_SIZE = 2 * 1024 * 1024 * 1024; // 2GB in bytes
+        // Set size limits
+        const PART_SIZE = 1.8 * 1024 * 1024 * 1024; // 1.8GB in bytes
         const torrentName = torrent.name.replace(/[<>:"/\\|?*]/g, '_').replace(/[\u{1F300}-\u{1F9FF}]/gu, '').trim();
 
-        // If total size is larger than 2GB, split into parts
+        // If total size is larger than the part size limit, split into parts
         if (totalSize > PART_SIZE) {
-            await bot.sendMessage(chatId, '📦 Total size is larger than 2GB. Creating split archives...');
+            await bot.sendMessage(chatId, `📦 Total size is larger than ${formatSize(PART_SIZE)}. Creating split archives...`);
             
             let currentArchive: archiver.Archiver | null = null;
             let currentSize = 0;
@@ -216,7 +217,10 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             try {
                 // Function to create new archive
                 const createNewArchive = () => {
-                    const archive = archiver('zip', { zlib: { level: 9 } });
+                    const archive = archiver('zip', { 
+                        zlib: { level: 9 },
+                        store: false // Use compression
+                    });
                     const partPath = path.join(tempDir!, `${torrentName}.part${partNum}.zip`);
                     const output = createWriteStream(partPath);
 
@@ -230,6 +234,16 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                         }
                     });
 
+                    // Monitor archive size
+                    let archiveSize = 0;
+                    archive.on('data', (chunk) => {
+                        archiveSize += chunk.length;
+                        if (archiveSize > PART_SIZE) {
+                            archive.abort();
+                            throw new Error(`Archive part ${partNum} exceeded size limit of ${formatSize(PART_SIZE)}`);
+                        }
+                    });
+
                     archive.pipe(output);
 
                     return {
@@ -237,6 +251,12 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                         partPath,
                         finalize: () => new Promise<void>((resolve, reject) => {
                             output.on('close', () => {
+                                // Verify the final file size
+                                const stats = fs.statSync(partPath);
+                                if (stats.size > PART_SIZE) {
+                                    reject(new Error(`Archive part ${partNum} is too large (${formatSize(stats.size)}). Limit is ${formatSize(PART_SIZE)}`));
+                                    return;
+                                }
                                 parts.push(partPath);
                                 resolve();
                             });
@@ -254,8 +274,8 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 for (const fileInfo of accessibleFiles) {
                     const stats = await fs.promises.stat(fileInfo.path);
                     
-                    // If current archive would exceed part size, create new one
-                    if (currentSize + stats.size > PART_SIZE) {
+                    // If current archive would exceed size limit, create new one
+                    if (currentSize + Math.ceil(stats.size * 0.9) > PART_SIZE * 0.95) { // Leave 5% buffer for zip overhead
                         // Only finalize if we have added files
                         if (currentSize > 0) {
                             await archiveInfo.finalize();
@@ -269,7 +289,7 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
 
                     // Add file to current archive
                     currentArchive.file(fileInfo.path, { name: fileInfo.filename });
-                    currentSize += stats.size;
+                    currentSize += Math.ceil(stats.size * 0.9); // Estimate compressed size
 
                     // Report progress every few files
                     if (partNum === 1 && accessibleFiles.length > 10) {
@@ -289,6 +309,8 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 for (let i = 0; i < parts.length; i++) {
                     const partPath = parts[i];
                     try {
+                        const stats = await fs.promises.stat(partPath);
+                        await bot.sendMessage(chatId, `📤 Sending part ${i + 1} of ${parts.length} (${formatSize(stats.size)})...`);
                         await bot.sendDocument(chatId, partPath, {
                             caption: `${torrentName} - Part ${i + 1} of ${parts.length}`
                         });
@@ -311,7 +333,7 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 }
             }
         } else {
-            // For total size under 2GB, create single archive
+            // For total size under 1.8GB, create single archive
             await bot.sendMessage(chatId, '📦 Creating archive of all files...');
             
             const zipPath = path.join(tempDir, `${torrentName}.zip`);
