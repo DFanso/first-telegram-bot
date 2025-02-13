@@ -176,7 +176,7 @@ interface TorrentFile {
 }
 
 const PART_SIZE = 512 * 1024; // 512KB as recommended by Telegram API
-const MAX_FILE_SIZE = 2000 * 1024 * 1024; // 2000MB (2GB)
+const MAX_ARCHIVE_SIZE = 1800 * 1024 * 1024; // 1.8GB to be safe
 
 async function splitFile(filePath: string, outputDir: string, originalName: string): Promise<string[]> {
     const stats = await fs.promises.stat(filePath);
@@ -229,8 +229,8 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             throw new Error('No accessible files found in torrent');
         }
 
-        // For single files under 512KB, send directly
-        if (accessibleFiles.length === 1 && accessibleFiles[0].size <= PART_SIZE) {
+        // For single files under 2GB, send directly
+        if (accessibleFiles.length === 1 && accessibleFiles[0].size < MAX_ARCHIVE_SIZE) {
             const file = accessibleFiles[0];
             await bot.sendMessage(chatId, `📤 Sending file directly: ${file.filename} (${formatSize(file.size)})...`);
             await bot.sendDocument(chatId, file.path, {
@@ -240,56 +240,69 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             return;
         }
 
-        // Create archive
+        // Sort files by size in descending order
+        accessibleFiles.sort((a, b) => b.size - a.size);
+
         const torrentName = torrent.name.replace(/[<>:"/\\|?*]/g, '_').replace(/[\u{1F300}-\u{1F9FF}]/gu, '').trim();
-        const zipPath = path.join(tempDir, `${torrentName}.zip`);
-        
-        await bot.sendMessage(chatId, '📦 Creating archive of all files...');
-        
-        const output = createWriteStream(zipPath);
-        const archive = archiver('zip', { 
-            zlib: { level: 6 },
-            store: false
-        });
+        let currentArchiveSize = 0;
+        let currentArchiveFiles: TorrentFile[] = [];
+        let archiveNumber = 1;
+        const totalArchives = Math.ceil(totalSize / MAX_ARCHIVE_SIZE);
 
-        archive.pipe(output);
-
-        // Add all files to archive
-        for (const fileInfo of accessibleFiles) {
-            archive.file(fileInfo.path, { name: fileInfo.filename });
-        }
-
-        await archive.finalize();
-
-        // Get archive size
-        const zipStats = await fs.promises.stat(zipPath);
-        if (zipStats.size > MAX_FILE_SIZE) {
-            throw new Error(`Archive size (${formatSize(zipStats.size)}) exceeds 2GB limit`);
-        }
-
-        // For files larger than 512KB, split into parts
-        if (zipStats.size > PART_SIZE) {
-            await bot.sendMessage(chatId, `📤 Splitting archive into ${Math.ceil(zipStats.size / PART_SIZE)} parts...`);
-            const parts = await splitFile(zipPath, tempDir, torrentName);
-            
-            for (let i = 0; i < parts.length; i++) {
-                const partPath = parts[i];
-                const partStats = await fs.promises.stat(partPath);
-                await bot.sendMessage(chatId, `📤 Sending part ${i + 1} of ${parts.length} (${formatSize(partStats.size)})...`);
+        // Group files into archives
+        for (const file of accessibleFiles) {
+            if (file.size > MAX_ARCHIVE_SIZE) {
+                // Handle large individual files separately
+                await bot.sendMessage(chatId, `📦 Processing large file: ${file.filename} (${formatSize(file.size)})...`);
+                const splitPath = path.join(tempDir, `${file.filename}.split`);
+                await fs.promises.mkdir(splitPath, { recursive: true });
                 
-                await bot.sendDocument(chatId, partPath, {
-                    caption: `${torrentName} - Part ${i + 1} of ${parts.length}`
-                });
+                const parts = await splitFile(file.path, splitPath, file.filename);
+                for (let i = 0; i < parts.length; i++) {
+                    const partPath = parts[i];
+                    const partStats = await fs.promises.stat(partPath);
+                    await bot.sendMessage(chatId, `📤 Sending part ${i + 1} of ${parts.length} (${formatSize(partStats.size)})...`);
+                    await bot.sendDocument(chatId, partPath, {
+                        caption: `${file.filename} - Part ${i + 1} of ${parts.length}`
+                    });
+                }
+                continue;
             }
-        } else {
-            // Send small archive directly
-            await bot.sendMessage(chatId, `📤 Sending archive (${formatSize(zipStats.size)})...`);
-            await bot.sendDocument(chatId, zipPath, {
-                caption: torrentName
-            });
+
+            if (currentArchiveSize + file.size > MAX_ARCHIVE_SIZE) {
+                // Create and send current archive
+                await createAndSendArchive(
+                    currentArchiveFiles,
+                    tempDir,
+                    `${torrentName}.part${archiveNumber}`,
+                    archiveNumber,
+                    totalArchives,
+                    bot,
+                    chatId
+                );
+                currentArchiveFiles = [];
+                currentArchiveSize = 0;
+                archiveNumber++;
+            }
+
+            currentArchiveFiles.push(file);
+            currentArchiveSize += file.size;
         }
 
-        await bot.sendMessage(chatId, '✅ Archive sent successfully!');
+        // Send remaining files in the last archive
+        if (currentArchiveFiles.length > 0) {
+            await createAndSendArchive(
+                currentArchiveFiles,
+                tempDir,
+                `${torrentName}.part${archiveNumber}`,
+                archiveNumber,
+                totalArchives,
+                bot,
+                chatId
+            );
+        }
+
+        await bot.sendMessage(chatId, '✅ All files sent successfully!');
     } catch (error) {
         console.error('Error handling completed torrent:', error);
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -308,6 +321,41 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             }
         }
     }
+}
+
+async function createAndSendArchive(
+    files: TorrentFile[],
+    tempDir: string,
+    archiveName: string,
+    partNumber: number,
+    totalParts: number,
+    bot: TelegramBot,
+    chatId: number
+): Promise<void> {
+    const zipPath = path.join(tempDir, `${archiveName}.zip`);
+    await bot.sendMessage(chatId, `📦 Creating archive part ${partNumber} of ${totalParts}...`);
+
+    const output = createWriteStream(zipPath);
+    const archive = archiver('zip', {
+        zlib: { level: 6 },
+        store: false
+    });
+
+    archive.pipe(output);
+
+    // Add files to archive
+    for (const file of files) {
+        archive.file(file.path, { name: file.filename });
+    }
+
+    await archive.finalize();
+
+    // Send the archive
+    const stats = await fs.promises.stat(zipPath);
+    await bot.sendMessage(chatId, `📤 Sending archive part ${partNumber} of ${totalParts} (${formatSize(stats.size)})...`);
+    await bot.sendDocument(chatId, zipPath, {
+        caption: `${archiveName} (Part ${partNumber} of ${totalParts})`
+    });
 }
 
 export const torrentCommand: Command = {
