@@ -208,164 +208,101 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
         if (totalSize > PART_SIZE) {
             await bot.sendMessage(chatId, '📦 Total size is larger than 2GB. Creating split archives...');
             
-            // Create a worker for compression and splitting
-            const worker = new Worker(`
-                const { parentPort, workerData } = require('worker_threads');
-                const fs = require('fs');
-                const archiver = require('archiver');
-                const path = require('path');
+            let currentArchive: archiver.Archiver | null = null;
+            let currentSize = 0;
+            let partNum = 1;
+            const parts: string[] = [];
 
-                async function compressFiles() {
-                    const { files, tempDir, PART_SIZE, torrentName } = workerData;
-                    let currentArchive = null;
-                    let currentSize = 0;
-                    let partNum = 1;
-                    const parts = [];
-                    let totalProcessed = 0;
-                    const totalSize = files.reduce((sum, f) => sum + fs.statSync(f.path).size, 0);
+            try {
+                // Function to create new archive
+                const createNewArchive = () => {
+                    const archive = archiver('zip', { zlib: { level: 9 } });
+                    const partPath = path.join(tempDir!, `${torrentName}.part${partNum}.zip`);
+                    const output = createWriteStream(partPath);
 
-                    try {
-                        // Ensure temp directory exists
-                        await fs.promises.mkdir(tempDir, { recursive: true });
-
-                        // Function to create new archive
-                        function createNewArchive() {
-                            const archive = archiver('zip', { zlib: { level: 9 } });
-                            const partPath = path.join(tempDir, \`\${torrentName}.part\${partNum}.zip\`);
-                            
-                            // Ensure the directory exists before creating the write stream
-                            fs.mkdirSync(path.dirname(partPath), { recursive: true });
-                            
-                            const output = fs.createWriteStream(partPath);
-
-                            return new Promise((resolve, reject) => {
-                                output.on('close', () => resolve(partPath));
-                                output.on('error', (err) => {
-                                    reject(new Error(\`Failed to write to \${partPath}: \${err.message}\`));
-                                });
-                                archive.on('error', (err) => {
-                                    reject(new Error(\`Archive error for \${partPath}: \${err.message}\`));
-                                });
-                                archive.on('warning', (err) => {
-                                    if (err.code !== 'ENOENT') {
-                                        console.warn(\`Archive warning: \${err.message}\`);
-                                    }
-                                });
-                                archive.pipe(output);
-                            }).then(path => {
-                                parts.push(path);
-                                partNum++;
-                                currentSize = 0;
-                                return archive;
-                            });
-                        }
-
-                        // Create first archive
-                        currentArchive = await createNewArchive();
-
-                        // Process each file
-                        for (const file of files) {
-                            // Verify file exists and is readable before processing
-                            try {
-                                await fs.promises.access(file.path, fs.constants.R_OK);
-                            } catch (err) {
-                                parentPort.postMessage({ 
-                                    type: 'warning', 
-                                    message: \`Skipping inaccessible file \${file.filename}: \${err.message}\` 
-                                });
-                                continue;
-                            }
-
-                            const stats = fs.statSync(file.path);
-                            
-                            // If single file is larger than part size, need to split it
-                            if (stats.size > PART_SIZE) {
-                                throw new Error(\`File \${file.filename} is too large (\${stats.size} bytes) to process\`);
-                            }
-
-                            // If current archive would exceed part size, create new one
-                            if (currentSize + stats.size > PART_SIZE) {
-                                await currentArchive.finalize();
-                                currentArchive = await createNewArchive();
-                            }
-
-                            // Add file to current archive
-                            currentArchive.file(file.path, { name: file.filename });
-                            currentSize += stats.size;
-                            totalProcessed += stats.size;
-
-                            // Report progress
-                            parentPort.postMessage({ 
-                                type: 'progress',
-                                progress: (totalProcessed / totalSize) * 100,
-                                currentPart: partNum - 1,
-                                totalFiles: files.length
-                            });
-                        }
-
-                        // Finalize last archive
-                        if (currentArchive) {
-                            await currentArchive.finalize();
-                        }
-
-                        parentPort.postMessage({ type: 'complete', parts });
-                    } catch (error) {
-                        parentPort.postMessage({ 
-                            type: 'error', 
-                            error: \`Compression error: \${error.message}\` 
-                        });
-                    }
-                }
-
-                compressFiles().catch(error => {
-                    parentPort.postMessage({ 
-                        type: 'error', 
-                        error: \`Worker error: \${error.message}\` 
+                    archive.on('error', (err) => {
+                        throw new Error(`Archive error: ${err.message}`);
                     });
-                });
-            `, { eval: true, workerData: { 
-                files: accessibleFiles,
-                tempDir, 
-                PART_SIZE,
-                torrentName
-            }});
 
-            // Handle worker messages
-            worker.on('message', async (message) => {
-                if (message.type === 'progress') {
-                    await bot.sendMessage(
-                        chatId, 
-                        `📦 Creating archive part ${message.currentPart}, overall progress: ${Math.round(message.progress)}%`
-                    );
-                } else if (message.type === 'warning') {
-                    await bot.sendMessage(chatId, `⚠️ ${message.message}`);
-                } else if (message.type === 'complete') {
-                    const parts = message.parts;
-                    await bot.sendMessage(chatId, `✅ Created ${parts.length} archive parts. Sending files...`);
-                    
-                    // Send each part
-                    for (let i = 0; i < parts.length; i++) {
-                        try {
-                            const partPath = parts[i];
-                            await bot.sendDocument(chatId, partPath, {
-                                caption: `${torrentName} - Part ${i + 1} of ${parts.length}`
-                            });
-                        } catch (sendError: any) {
-                            console.error(`Failed to send part ${i + 1}:`, sendError);
-                            throw new Error(`Failed to send part ${i + 1}: ${sendError?.message || 'Unknown error'}`);
+                    archive.on('warning', (err) => {
+                        if (err.code !== 'ENOENT') {
+                            console.warn('Archive warning:', err);
                         }
-                    }
-                    
-                    await bot.sendMessage(chatId, '✅ All archive parts sent successfully!');
-                } else if (message.type === 'error') {
-                    throw new Error(message.error);
-                }
-            });
+                    });
 
-            // Handle worker errors
-            worker.on('error', (error) => {
-                throw new Error(`Worker error: ${error.message}`);
-            });
+                    archive.pipe(output);
+
+                    return {
+                        archive,
+                        partPath,
+                        finalize: () => new Promise<void>((resolve, reject) => {
+                            output.on('close', () => {
+                                parts.push(partPath);
+                                resolve();
+                            });
+                            output.on('error', reject);
+                            archive.finalize();
+                        })
+                    };
+                };
+
+                // Create first archive
+                let archiveInfo = createNewArchive();
+                currentArchive = archiveInfo.archive;
+
+                // Process each file
+                for (const fileInfo of accessibleFiles) {
+                    const stats = await fs.promises.stat(fileInfo.path);
+                    
+                    // Check if single file is too large
+                    if (stats.size > PART_SIZE) {
+                        throw new Error(`File ${fileInfo.filename} is too large (${formatSize(stats.size)}) to process. Maximum size per file is ${formatSize(PART_SIZE)}.`);
+                    }
+
+                    // If current archive would exceed part size, create new one
+                    if (currentSize + stats.size > PART_SIZE) {
+                        await archiveInfo.finalize();
+                        partNum++;
+                        archiveInfo = createNewArchive();
+                        currentArchive = archiveInfo.archive;
+                        currentSize = 0;
+                        await bot.sendMessage(chatId, `📦 Creating archive part ${partNum}...`);
+                    }
+
+                    // Add file to current archive
+                    currentArchive.file(fileInfo.path, { name: fileInfo.filename });
+                    currentSize += stats.size;
+
+                    // Report progress every few files
+                    if (partNum === 1 && accessibleFiles.length > 10) {
+                        const progress = Math.round((currentSize / PART_SIZE) * 100);
+                        await bot.sendMessage(chatId, `📦 Part ${partNum}: ${progress}% (${formatSize(currentSize)} / ${formatSize(PART_SIZE)})`);
+                    }
+                }
+
+                // Finalize last archive
+                if (currentArchive) {
+                    await archiveInfo.finalize();
+                }
+
+                // Send all parts
+                await bot.sendMessage(chatId, `✅ Created ${parts.length} archive parts. Sending files...`);
+                
+                for (let i = 0; i < parts.length; i++) {
+                    const partPath = parts[i];
+                    try {
+                        await bot.sendDocument(chatId, partPath, {
+                            caption: `${torrentName} - Part ${i + 1} of ${parts.length}`
+                        });
+                    } catch (sendError: any) {
+                        throw new Error(`Failed to send part ${i + 1}: ${sendError?.message || 'Unknown error'}`);
+                    }
+                }
+                
+                await bot.sendMessage(chatId, '✅ All archive parts sent successfully!');
+            } catch (error) {
+                throw error;
+            }
         } else {
             // For total size under 2GB, create single archive
             await bot.sendMessage(chatId, '📦 Creating archive of all files...');
