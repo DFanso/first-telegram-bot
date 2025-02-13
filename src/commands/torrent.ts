@@ -154,7 +154,7 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
         // Get the file from qBittorrent
         const fileInfo = await qbittorrent.downloadFile(torrent.hash);
         
-        // Convert network path to local path if needed
+        // Convert network path to local path if needed and normalize it
         let sourceFilePath = fileInfo.path;
         if (config.QBITTORRENT_NETWORK_PATH && config.QBITTORRENT_DOWNLOAD_PATH) {
             sourceFilePath = sourceFilePath.replace(
@@ -162,28 +162,38 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 path.resolve(config.QBITTORRENT_DOWNLOAD_PATH)
             );
         }
+        sourceFilePath = path.normalize(sourceFilePath);
 
-        // Sanitize file paths
-        const sanitizedSourcePath = decodeURIComponent(sourceFilePath).replace(/[\u{1F300}-\u{1F9FF}]/gu, '').trim();
+        // Sanitize file paths and handle Windows-specific issues
+        const sanitizedSourcePath = decodeURIComponent(sourceFilePath)
+            .replace(/[\u{1F300}-\u{1F9FF}]/gu, '')
+            .replace(/[<>:"/\\|?*]/g, '_') // Replace Windows-invalid characters
+            .trim();
         
-        // Verify file exists
-        if (!fs.existsSync(sanitizedSourcePath)) {
-            throw new Error(`File not found at local path: ${sanitizedSourcePath}`);
+        // Verify file exists and is accessible
+        try {
+            await fs.promises.access(sanitizedSourcePath, fs.constants.R_OK);
+        } catch (accessError) {
+            console.error('File access error:', accessError);
+            throw new Error(`Cannot access file at path: ${sanitizedSourcePath}. Please check file permissions.`);
         }
 
         const fileName = path.basename(sanitizedSourcePath)
             .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Remove emojis
-            .replace(/[^\w\s\-\.]/g, '_') // Replace special chars with underscore
+            .replace(/[<>:"/\\|?*]/g, '_') // Replace Windows-invalid characters
+            .replace(/[^\w\s\-\.]/g, '_') // Replace other special chars with underscore
             .trim();
         
-        // Create temp directory with elevated permissions
-        const tempDir = path.join(process.cwd(), 'temp', Date.now().toString());
+        // Create temp directory in user's temp folder instead of project directory
+        const tempDir = path.join(process.env.TEMP || process.env.TMP || path.join(process.cwd(), 'temp'), 'telegram-bot', Date.now().toString());
         try {
             if (!fs.existsSync(tempDir)) {
-                fs.mkdirSync(tempDir, { recursive: true, mode: 0o777 });
+                await fs.promises.mkdir(tempDir, { recursive: true });
             }
+            // Ensure we have write permissions
+            await fs.promises.access(tempDir, fs.constants.W_OK);
         } catch (mkdirError) {
-            console.error('Failed to create temp directory:', mkdirError);
+            console.error('Failed to create/access temp directory:', mkdirError);
             throw new Error('Failed to create temporary directory. Please check folder permissions.');
         }
 
@@ -209,33 +219,83 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                     let partNum = 1;
                     let processedBytes = 0;
 
+                    // Ensure source file is readable
                     try {
-                        while (processedBytes < fs.statSync(sourceFilePath).size) {
+                        await fs.promises.access(sourceFilePath, fs.constants.R_OK);
+                    } catch (error) {
+                        throw new Error(\`Cannot read source file: \${error.message}\`);
+                    }
+
+                    // Ensure temp directory is writable
+                    try {
+                        await fs.promises.access(tempDir, fs.constants.W_OK);
+                    } catch (error) {
+                        throw new Error(\`Cannot write to temp directory: \${error.message}\`);
+                    }
+
+                    try {
+                        const fileSize = (await fs.promises.stat(sourceFilePath)).size;
+                        while (processedBytes < fileSize) {
                             const archive = archiver('zip', { zlib: { level: 9 } });
                             const partPath = path.join(tempDir, \`\${fileName}.part\${partNum}.zip\`);
-                            const output = fs.createWriteStream(partPath, { mode: 0o666 });
+                            
+                            // Create write stream with explicit close handling
+                            const output = fs.createWriteStream(partPath);
+                            let streamClosed = false;
+
+                            const closeStream = () => {
+                                if (!streamClosed) {
+                                    streamClosed = true;
+                                    output.end();
+                                }
+                            };
+
+                            output.on('error', (err) => {
+                                closeStream();
+                                throw err;
+                            });
 
                             archive.on('error', (err) => {
+                                closeStream();
                                 throw err;
+                            });
+
+                            archive.on('end', () => {
+                                closeStream();
                             });
 
                             archive.pipe(output);
 
-                            const currentPartSize = Math.min(PART_SIZE, fs.statSync(sourceFilePath).size - processedBytes);
-                            archive.append(fs.createReadStream(sourceFilePath, {
+                            const currentPartSize = Math.min(PART_SIZE, fileSize - processedBytes);
+                            
+                            // Create read stream with explicit error handling
+                            const readStream = fs.createReadStream(sourceFilePath, {
                                 start: processedBytes,
                                 end: processedBytes + currentPartSize - 1,
-                                mode: 0o666
-                            }), { name: fileName });
+                                highWaterMark: 64 * 1024 // 64KB chunks
+                            });
 
-                            await archive.finalize();
+                            readStream.on('error', (err) => {
+                                closeStream();
+                                throw err;
+                            });
+
+                            archive.append(readStream, { name: fileName });
+
+                            // Wait for archive to finalize
+                            await new Promise((resolve, reject) => {
+                                output.on('close', resolve);
+                                archive.on('error', reject);
+                                archive.finalize();
+                            });
+
                             parts.push(partPath);
                             processedBytes += currentPartSize;
                             partNum++;
                             
                             parentPort.postMessage({ 
                                 type: 'progress', 
-                                progress: (processedBytes / fs.statSync(sourceFilePath).size) * 100 
+                                progress: (processedBytes / fileSize) * 100 
                             });
                         }
 
