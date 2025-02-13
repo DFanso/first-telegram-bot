@@ -254,19 +254,17 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 for (const fileInfo of accessibleFiles) {
                     const stats = await fs.promises.stat(fileInfo.path);
                     
-                    // Check if single file is too large
-                    if (stats.size > PART_SIZE) {
-                        throw new Error(`File ${fileInfo.filename} is too large (${formatSize(stats.size)}) to process. Maximum size per file is ${formatSize(PART_SIZE)}.`);
-                    }
-
                     // If current archive would exceed part size, create new one
                     if (currentSize + stats.size > PART_SIZE) {
-                        await archiveInfo.finalize();
-                        partNum++;
-                        archiveInfo = createNewArchive();
-                        currentArchive = archiveInfo.archive;
-                        currentSize = 0;
-                        await bot.sendMessage(chatId, `📦 Creating archive part ${partNum}...`);
+                        // Only finalize if we have added files
+                        if (currentSize > 0) {
+                            await archiveInfo.finalize();
+                            partNum++;
+                            archiveInfo = createNewArchive();
+                            currentArchive = archiveInfo.archive;
+                            currentSize = 0;
+                            await bot.sendMessage(chatId, `📦 Creating archive part ${partNum}...`);
+                        }
                     }
 
                     // Add file to current archive
@@ -281,7 +279,7 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 }
 
                 // Finalize last archive
-                if (currentArchive) {
+                if (currentArchive && currentSize > 0) {
                     await archiveInfo.finalize();
                 }
 
@@ -302,6 +300,15 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 await bot.sendMessage(chatId, '✅ All archive parts sent successfully!');
             } catch (error) {
                 throw error;
+            } finally {
+                // Clean up any remaining archives
+                if (currentArchive) {
+                    try {
+                        currentArchive.abort();
+                    } catch (err) {
+                        console.error('Error aborting archive:', err);
+                    }
+                }
             }
         } else {
             // For total size under 2GB, create single archive
