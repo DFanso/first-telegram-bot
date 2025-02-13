@@ -254,7 +254,7 @@ class QBittorrentService {
         }
     }
 
-    async downloadFile(hash: string): Promise<{ path: string; filename: string }> {
+    async downloadFile(hash: string): Promise<{ path: string; filename: string }[]> {
         try {
             await this.ensureLoggedIn();
             
@@ -271,48 +271,56 @@ class QBittorrentService {
                 throw new Error('No files found in torrent');
             }
 
-            // For now, we'll handle the first file
-            const file = files[0];
-            console.log('Getting file:', file.name);
+            const results: { path: string; filename: string }[] = [];
 
-            // Try different possible paths
-            const possiblePaths = [
-                path.join(torrent.save_path, torrent.name, file.name),
-                path.join(torrent.save_path, file.name),
-                torrent.content_path,
-                path.join(torrent.save_path, path.basename(file.name))
-            ].filter(Boolean); // Remove undefined/null paths
+            // Process all files
+            for (const file of files) {
+                console.log('Getting file:', file.name);
 
-            console.log('Trying possible paths:', possiblePaths);
+                // Try different possible paths
+                const possiblePaths = [
+                    path.join(torrent.save_path, torrent.name, file.name),
+                    path.join(torrent.save_path, file.name),
+                    path.join(torrent.save_path, path.basename(file.name))
+                ].filter(Boolean); // Remove undefined/null paths
 
-            // Find the first path that exists
-            let sourceFilePath: string | undefined;
-            for (const testPath of possiblePaths) {
-                if (fs.existsSync(testPath)) {
-                    sourceFilePath = testPath;
-                    break;
+                console.log('Trying possible paths:', possiblePaths);
+
+                // Find the first path that exists
+                let sourceFilePath: string | undefined;
+                for (const testPath of possiblePaths) {
+                    if (fs.existsSync(testPath)) {
+                        sourceFilePath = testPath;
+                        break;
+                    }
                 }
+
+                if (!sourceFilePath) {
+                    console.warn(`File not found. Tried paths: ${possiblePaths.join(', ')}`);
+                    continue; // Skip this file and continue with others
+                }
+
+                console.log('Found file at:', sourceFilePath);
+
+                // Create sanitized filename for display/reference
+                const sanitizedName = path.basename(file.name)
+                    .replace(/[<>:"/\\|?*]/g, '_')
+                    .replace(/[\u{1F300}-\u{1F9FF}]/gu, '')
+                    .trim();
+
+                results.push({
+                    path: sourceFilePath,
+                    filename: sanitizedName
+                });
             }
 
-            if (!sourceFilePath) {
-                throw new Error(`File not found. Tried paths: ${possiblePaths.join(', ')}`);
+            if (results.length === 0) {
+                throw new Error('No accessible files found in torrent');
             }
 
-            console.log('Found file at:', sourceFilePath);
-
-            // Create sanitized filename for display/reference
-            const sanitizedName = path.basename(file.name)
-                .replace(/[<>:"/\\|?*]/g, '_')
-                .replace(/[\u{1F300}-\u{1F9FF}]/gu, '')
-                .trim();
-
-            // Return the actual file path and sanitized name
-            return {
-                path: sourceFilePath,
-                filename: sanitizedName
-            };
+            return results;
         } catch (error) {
-            console.error('Failed to get file:', error);
+            console.error('Failed to get files:', error);
             throw error;
         }
     }
