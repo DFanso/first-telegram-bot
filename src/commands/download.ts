@@ -94,22 +94,52 @@ const YOUTUBE_URL_PATTERN = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+
 
 // Add speed calculation helper
 function calculateSpeed(bytesDownloaded: number, elapsedMs: number, totalSize: number): { speed: string; eta: string } {
+    // Handle edge cases
+    if (elapsedMs <= 0 || bytesDownloaded <= 0) {
+        return {
+            speed: '0 B/s',
+            eta: 'calculating...'
+        };
+    }
+
     const bytesPerSecond = (bytesDownloaded / elapsedMs) * 1000;
+    
+    // Ensure we have valid numbers
+    if (!isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
+        return {
+            speed: '0 B/s',
+            eta: 'calculating...'
+        };
+    }
+
     const speed = formatSize(bytesPerSecond) + '/s';
     
     // Calculate ETA
-    const remainingBytes = totalSize - bytesDownloaded;
+    const remainingBytes = Math.max(0, totalSize - bytesDownloaded);
     const etaSeconds = Math.round(remainingBytes / bytesPerSecond);
+    
+    // Handle invalid ETA
+    if (!isFinite(etaSeconds) || etaSeconds < 0) {
+        return {
+            speed,
+            eta: 'calculating...'
+        };
+    }
+
     const etaMinutes = Math.floor(etaSeconds / 60);
     const etaHours = Math.floor(etaMinutes / 60);
     
-    let eta = '';
-    if (etaHours > 0) {
+    let eta: string;
+    if (etaHours > 24) {
+        eta = '> 24h';
+    } else if (etaHours > 0) {
         eta = `${etaHours}h ${etaMinutes % 60}m`;
     } else if (etaMinutes > 0) {
         eta = `${etaMinutes}m ${etaSeconds % 60}s`;
-    } else {
+    } else if (etaSeconds > 0) {
         eta = `${etaSeconds}s`;
+    } else {
+        eta = 'almost done';
     }
     
     return { speed, eta };
