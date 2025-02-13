@@ -175,20 +175,20 @@ interface TorrentFile {
     size: number;
 }
 
-const PART_SIZE = 512 * 1024; // 512KB as recommended by Telegram API
 const MAX_ARCHIVE_SIZE = 1800 * 1024 * 1024; // 1.8GB to be safe
+const SPLIT_SIZE = 1500 * 1024 * 1024; // 1.5GB for file splits
 
 async function splitFile(filePath: string, outputDir: string, originalName: string): Promise<string[]> {
     const stats = await fs.promises.stat(filePath);
-    const totalParts = Math.ceil(stats.size / PART_SIZE);
+    const totalParts = Math.ceil(stats.size / SPLIT_SIZE);
     const parts: string[] = [];
 
     for (let i = 0; i < totalParts; i++) {
         const partPath = path.join(outputDir, `${originalName}.part${i + 1}`);
         const writeStream = createWriteStream(partPath);
         const readStream = createReadStream(filePath, {
-            start: i * PART_SIZE,
-            end: Math.min((i + 1) * PART_SIZE - 1, stats.size - 1)
+            start: i * SPLIT_SIZE,
+            end: Math.min((i + 1) * SPLIT_SIZE - 1, stats.size - 1)
         });
 
         await pipeline(readStream, writeStream);
@@ -229,7 +229,7 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             throw new Error('No accessible files found in torrent');
         }
 
-        // For single files under 2GB, send directly
+        // For single files under 1.8GB, send directly
         if (accessibleFiles.length === 1 && accessibleFiles[0].size < MAX_ARCHIVE_SIZE) {
             const file = accessibleFiles[0];
             await bot.sendMessage(chatId, `📤 Sending file directly: ${file.filename} (${formatSize(file.size)})...`);
@@ -258,6 +258,8 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 await fs.promises.mkdir(splitPath, { recursive: true });
                 
                 const parts = await splitFile(file.path, splitPath, file.filename);
+                
+                // Send each part
                 for (let i = 0; i < parts.length; i++) {
                     const partPath = parts[i];
                     const partStats = await fs.promises.stat(partPath);
@@ -271,15 +273,17 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
 
             if (currentArchiveSize + file.size > MAX_ARCHIVE_SIZE) {
                 // Create and send current archive
-                await createAndSendArchive(
-                    currentArchiveFiles,
-                    tempDir,
-                    `${torrentName}.part${archiveNumber}`,
-                    archiveNumber,
-                    totalArchives,
-                    bot,
-                    chatId
-                );
+                if (currentArchiveFiles.length > 0) {
+                    await createAndSendArchive(
+                        currentArchiveFiles,
+                        tempDir,
+                        `${torrentName}.part${archiveNumber}`,
+                        archiveNumber,
+                        totalArchives,
+                        bot,
+                        chatId
+                    );
+                }
                 currentArchiveFiles = [];
                 currentArchiveSize = 0;
                 archiveNumber++;
