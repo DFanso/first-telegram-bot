@@ -177,11 +177,29 @@ interface TorrentFile {
 
 const MAX_ARCHIVE_SIZE = 1800 * 1024 * 1024; // 1.8GB to be safe
 const SPLIT_SIZE = 1500 * 1024 * 1024; // 1.5GB for file splits
+const PROGRESS_UPDATE_INTERVAL = 3000; // Update progress every 3 seconds
 
-async function splitFile(filePath: string, outputDir: string, originalName: string): Promise<string[]> {
+async function updateProgress(bot: TelegramBot, chatId: number, messageId: number, text: string): Promise<void> {
+    try {
+        await bot.editMessageText(text, {
+            chat_id: chatId,
+            message_id: messageId,
+            parse_mode: 'HTML'
+        });
+    } catch (error) {
+        console.error('Failed to update progress:', error);
+    }
+}
+
+async function splitFile(filePath: string, outputDir: string, originalName: string, bot: TelegramBot, chatId: number): Promise<string[]> {
     const stats = await fs.promises.stat(filePath);
     const totalParts = Math.ceil(stats.size / SPLIT_SIZE);
     const parts: string[] = [];
+
+    // Send initial progress message
+    const progressMsg = await bot.sendMessage(chatId, '📦 Starting file split...');
+    let lastUpdate = 0;
+    let processedBytes = 0;
 
     for (let i = 0; i < totalParts; i++) {
         const partPath = path.join(outputDir, `${originalName}.part${i + 1}`);
@@ -191,10 +209,34 @@ async function splitFile(filePath: string, outputDir: string, originalName: stri
             end: Math.min((i + 1) * SPLIT_SIZE - 1, stats.size - 1)
         });
 
+        // Track progress for current part
+        readStream.on('data', (chunk) => {
+            processedBytes += chunk.length;
+            const now = Date.now();
+            if (now - lastUpdate >= PROGRESS_UPDATE_INTERVAL) {
+                const progress = Math.round((processedBytes / stats.size) * 100);
+                const progressBar = '█'.repeat(Math.floor(progress / 5)) + '░'.repeat(20 - Math.floor(progress / 5));
+                updateProgress(bot, chatId, progressMsg.message_id,
+                    `📦 Splitting file: Part ${i + 1} of ${totalParts}\n` +
+                    `${progressBar} ${progress}%\n` +
+                    `Processed: ${formatSize(processedBytes)} / ${formatSize(stats.size)}`
+                );
+                lastUpdate = now;
+            }
+        });
+
         await pipeline(readStream, writeStream);
         parts.push(partPath);
+
+        // Update progress after each part
+        const progress = Math.round(((i + 1) / totalParts) * 100);
+        await updateProgress(bot, chatId, progressMsg.message_id,
+            `✅ Completed part ${i + 1} of ${totalParts} (${progress}%)`
+        );
     }
 
+    // Delete progress message
+    await bot.deleteMessage(chatId, progressMsg.message_id);
     return parts;
 }
 
@@ -257,7 +299,7 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 const splitPath = path.join(tempDir, `${file.filename}.split`);
                 await fs.promises.mkdir(splitPath, { recursive: true });
                 
-                const parts = await splitFile(file.path, splitPath, file.filename);
+                const parts = await splitFile(file.path, splitPath, file.filename, bot, chatId);
                 
                 // Send each part
                 for (let i = 0; i < parts.length; i++) {
@@ -337,29 +379,75 @@ async function createAndSendArchive(
     chatId: number
 ): Promise<void> {
     const zipPath = path.join(tempDir, `${archiveName}.zip`);
-    await bot.sendMessage(chatId, `📦 Creating archive part ${partNumber} of ${totalParts}...`);
-
+    
+    // Send initial progress message
+    const progressMsg = await bot.sendMessage(chatId, `📦 Creating archive part ${partNumber} of ${totalParts}...`);
+    
     const output = createWriteStream(zipPath);
     const archive = archiver('zip', {
         zlib: { level: 6 },
         store: false
     });
 
+    // Calculate total size
+    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+    let processedBytes = 0;
+    let lastUpdate = 0;
+
+    // Track archiving progress
+    archive.on('data', (chunk) => {
+        processedBytes += chunk.length;
+        const now = Date.now();
+        if (now - lastUpdate >= PROGRESS_UPDATE_INTERVAL) {
+            const progress = Math.round((processedBytes / totalSize) * 100);
+            const progressBar = '█'.repeat(Math.floor(progress / 5)) + '░'.repeat(20 - Math.floor(progress / 5));
+            updateProgress(bot, chatId, progressMsg.message_id,
+                `📦 Creating archive part ${partNumber} of ${totalParts}\n` +
+                `${progressBar} ${progress}%\n` +
+                `Processed: ${formatSize(processedBytes)} / ${formatSize(totalSize)}`
+            );
+            lastUpdate = now;
+        }
+    });
+
+    archive.on('warning', (err) => {
+        if (err.code === 'ENOENT') {
+            console.warn('Archive warning:', err);
+        } else {
+            throw err;
+        }
+    });
+
+    archive.on('error', (err) => {
+        throw err;
+    });
+
     archive.pipe(output);
 
-    // Add files to archive
-    for (const file of files) {
+    // Add files to archive with individual progress
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
         archive.file(file.path, { name: file.filename });
+        await updateProgress(bot, chatId, progressMsg.message_id,
+            `📦 Adding file ${i + 1} of ${files.length} to archive part ${partNumber}\n` +
+            `Current file: ${file.filename}`
+        );
     }
 
     await archive.finalize();
 
-    // Send the archive
+    // Get final archive size and send
     const stats = await fs.promises.stat(zipPath);
-    await bot.sendMessage(chatId, `📤 Sending archive part ${partNumber} of ${totalParts} (${formatSize(stats.size)})...`);
+    await updateProgress(bot, chatId, progressMsg.message_id,
+        `📤 Sending archive part ${partNumber} of ${totalParts} (${formatSize(stats.size)})...`
+    );
+
     await bot.sendDocument(chatId, zipPath, {
         caption: `${archiveName} (Part ${partNumber} of ${totalParts})`
     });
+
+    // Delete progress message
+    await bot.deleteMessage(chatId, progressMsg.message_id);
 }
 
 export const torrentCommand: Command = {
