@@ -148,6 +148,7 @@ async function monitorTorrentProgress(hash: string, bot: TelegramBot) {
 
 // Handle completed torrent
 async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: number) {
+    let tempDir: string | undefined;
     try {
         await bot.sendMessage(chatId, '✅ Download complete! Processing file...');
         
@@ -162,16 +163,9 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             throw new Error(`Cannot access file at path: ${fileInfo.path}. Please check file permissions.`);
         }
 
-        // Create temp directory in user's temp folder instead of project directory
-        const tempDir = path.join(process.env.TEMP || process.env.TMP || path.join(process.cwd(), 'temp'), 'telegram-bot', Date.now().toString());
-        try {
-            await fs.promises.mkdir(tempDir, { recursive: true });
-            // Ensure we have write permissions
-            await fs.promises.access(tempDir, fs.constants.W_OK);
-        } catch (mkdirError) {
-            console.error('Failed to create/access temp directory:', mkdirError);
-            throw new Error('Failed to create temporary directory. Please check folder permissions.');
-        }
+        // Create temp directory for zip files only
+        tempDir = path.join(process.env.TEMP || process.env.TMP || path.join(process.cwd(), 'temp'), 'telegram-bot', Date.now().toString());
+        await fs.promises.mkdir(tempDir, { recursive: true });
 
         // Get file size
         const stats = await fs.promises.stat(fileInfo.path);
@@ -191,9 +185,6 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
 
                 async function compressAndSplit() {
                     const { sourceFilePath, tempDir, PART_SIZE, fileName } = workerData;
-                    const parts = [];
-                    let partNum = 1;
-                    let processedBytes = 0;
 
                     // Ensure source file is readable
                     try {
@@ -202,76 +193,46 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                         throw new Error(\`Cannot read source file: \${error.message}\`);
                     }
 
-                    // Ensure temp directory is writable
-                    try {
-                        await fs.promises.access(tempDir, fs.constants.W_OK);
-                    } catch (error) {
-                        throw new Error(\`Cannot write to temp directory: \${error.message}\`);
-                    }
-
                     try {
                         const fileSize = (await fs.promises.stat(sourceFilePath)).size;
-                        while (processedBytes < fileSize) {
-                            const archive = archiver('zip', { zlib: { level: 9 } });
+                        const numParts = Math.ceil(fileSize / PART_SIZE);
+                        const parts = [];
+
+                        for (let partNum = 1; partNum <= numParts; partNum++) {
+                            const start = (partNum - 1) * PART_SIZE;
+                            const end = Math.min(partNum * PART_SIZE, fileSize) - 1;
                             const partPath = path.join(tempDir, \`\${fileName}.part\${partNum}.zip\`);
-                            
-                            // Create write stream with explicit close handling
+
+                            const archive = archiver('zip', { zlib: { level: 9 } });
                             const output = fs.createWriteStream(partPath);
-                            let streamClosed = false;
 
-                            const closeStream = () => {
-                                if (!streamClosed) {
-                                    streamClosed = true;
-                                    output.end();
-                                }
-                            };
-
-                            output.on('error', (err) => {
-                                closeStream();
-                                throw err;
-                            });
-
-                            archive.on('error', (err) => {
-                                closeStream();
-                                throw err;
-                            });
-
-                            archive.on('end', () => {
-                                closeStream();
-                            });
-
-                            archive.pipe(output);
-
-                            const currentPartSize = Math.min(PART_SIZE, fileSize - processedBytes);
-                            
-                            // Create read stream with explicit error handling
-                            const readStream = fs.createReadStream(sourceFilePath, {
-                                start: processedBytes,
-                                end: processedBytes + currentPartSize - 1,
-                                highWaterMark: 64 * 1024 // 64KB chunks
-                            });
-
-                            readStream.on('error', (err) => {
-                                closeStream();
-                                throw err;
-                            });
-
-                            archive.append(readStream, { name: fileName });
-
-                            // Wait for archive to finalize
                             await new Promise((resolve, reject) => {
                                 output.on('close', resolve);
                                 archive.on('error', reject);
+                                archive.on('warning', console.warn);
+
+                                archive.pipe(output);
+
+                                const readStream = fs.createReadStream(sourceFilePath, { 
+                                    start, 
+                                    end,
+                                    highWaterMark: 64 * 1024 // 64KB chunks
+                                });
+
+                                archive.append(readStream, { 
+                                    name: fileName,
+                                    mode: 0o666
+                                });
+
                                 archive.finalize();
                             });
 
                             parts.push(partPath);
-                            processedBytes += currentPartSize;
-                            partNum++;
-                            
                             parentPort.postMessage({ 
                                 type: 'progress', 
-                                progress: (processedBytes / fileSize) * 100 
+                                progress: (end + 1) / fileSize * 100,
+                                part: partNum,
+                                total: numParts
                             });
                         }
 
@@ -300,7 +261,10 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             // Handle worker messages
             worker.on('message', async (message) => {
                 if (message.type === 'progress') {
-                    await bot.sendMessage(chatId, `📦 Compression progress: ${Math.round(message.progress)}%`);
+                    await bot.sendMessage(
+                        chatId, 
+                        `📦 Compressing part ${message.part}/${message.total}: ${Math.round(message.progress)}%`
+                    );
                 } else if (message.type === 'complete') {
                     const parts = message.parts;
                     await bot.sendMessage(chatId, `✅ File split and compressed into ${parts.length} parts. Sending files...`);
@@ -312,12 +276,6 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                             await bot.sendDocument(chatId, partPath, {
                                 caption: `Part ${i + 1} of ${parts.length}: ${path.basename(partPath)}`
                             });
-                            // Clean up part file after sending
-                            try {
-                                fs.unlinkSync(partPath);
-                            } catch (unlinkError) {
-                                console.error(`Failed to delete part file ${partPath}:`, unlinkError);
-                            }
                         } catch (sendError: any) {
                             console.error(`Failed to send part ${i + 1}:`, sendError);
                             throw new Error(`Failed to send part ${i + 1}: ${sendError?.message || 'Unknown error'}`);
@@ -335,40 +293,38 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 throw new Error(`Worker error: ${error.message}`);
             });
         } else {
-            // For files under 2GB, compress and send as single file
-            await bot.sendMessage(chatId, '📦 Compressing file...');
-            
-            const zipPath = path.join(tempDir, `${fileInfo.filename}.zip`);
-            const output = createWriteStream(zipPath, { mode: 0o666 });
-            const archive = archiver('zip', { zlib: { level: 9 } });
-            
-            archive.on('error', (err) => {
-                throw err;
-            });
-
-            archive.pipe(output);
-            archive.file(fileInfo.path, { name: fileInfo.filename });
-            
-            await archive.finalize();
-            
-            await bot.sendMessage(chatId, '📤 Sending compressed file...');
-            await bot.sendDocument(chatId, zipPath, {
-                caption: `${fileInfo.filename}.zip`
-            });
-            
-            // Clean up
+            // For files under 2GB, try to send directly first
             try {
-                fs.unlinkSync(zipPath);
-            } catch (unlinkError) {
-                console.error('Failed to delete zip file:', unlinkError);
-            }
-        }
+                await bot.sendMessage(chatId, '📤 Sending file directly...');
+                await bot.sendDocument(chatId, fileInfo.path, {
+                    caption: fileInfo.filename
+                });
+            } catch (sendError) {
+                // If direct send fails, try compressing
+                console.log('Direct send failed, trying compression:', sendError);
+                await bot.sendMessage(chatId, '📦 Compressing file...');
+                
+                const zipPath = path.join(tempDir, `${fileInfo.filename}.zip`);
+                const output = createWriteStream(zipPath);
+                const archive = archiver('zip', { zlib: { level: 9 } });
+                
+                archive.on('error', (err) => {
+                    throw err;
+                });
 
-        // Clean up temp directory
-        try {
-            fs.rmSync(tempDir, { recursive: true, force: true });
-        } catch (rmError) {
-            console.error('Failed to remove temp directory:', rmError);
+                archive.pipe(output);
+                archive.file(fileInfo.path, { 
+                    name: fileInfo.filename,
+                    mode: 0o666
+                });
+                
+                await archive.finalize();
+                
+                await bot.sendMessage(chatId, '📤 Sending compressed file...');
+                await bot.sendDocument(chatId, zipPath, {
+                    caption: `${fileInfo.filename}.zip`
+                });
+            }
         }
 
         await bot.sendMessage(chatId, '✅ File transfer completed successfully!');
@@ -379,6 +335,15 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             `❌ Failed to send the downloaded file: ${error instanceof Error ? error.message : 'Unknown error'}\n` +
             'The file is still available in qBittorrent if you want to try again.'
         );
+    } finally {
+        // Clean up temp directory if it was created
+        if (tempDir && fs.existsSync(tempDir)) {
+            try {
+                fs.rmSync(tempDir, { recursive: true, force: true });
+            } catch (rmError) {
+                console.error('Failed to remove temp directory:', rmError);
+            }
+        }
     }
 }
 

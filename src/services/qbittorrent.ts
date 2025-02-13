@@ -275,70 +275,42 @@ class QBittorrentService {
             const file = files[0];
             console.log('Getting file:', file.name);
 
-            // Construct source file path
-            const sourceFilePath = path.join(torrent.save_path, torrent.name, file.name);
-            console.log('Source file path:', sourceFilePath);
+            // Try different possible paths
+            const possiblePaths = [
+                path.join(torrent.save_path, torrent.name, file.name),
+                path.join(torrent.save_path, file.name),
+                torrent.content_path,
+                path.join(torrent.save_path, path.basename(file.name))
+            ].filter(Boolean); // Remove undefined/null paths
 
-            // Check if file exists
-            if (!fs.existsSync(sourceFilePath)) {
-                throw new Error(`File not found at path: ${sourceFilePath}`);
+            console.log('Trying possible paths:', possiblePaths);
+
+            // Find the first path that exists
+            let sourceFilePath: string | undefined;
+            for (const testPath of possiblePaths) {
+                if (fs.existsSync(testPath)) {
+                    sourceFilePath = testPath;
+                    break;
+                }
             }
 
-            // Create temp directory if it doesn't exist
-            const tempDir = path.join(process.cwd(), 'temp');
-            if (!fs.existsSync(tempDir)) {
-                await fs.promises.mkdir(tempDir, { recursive: true });
+            if (!sourceFilePath) {
+                throw new Error(`File not found. Tried paths: ${possiblePaths.join(', ')}`);
             }
 
-            // Create a temp file path with sanitized name
+            console.log('Found file at:', sourceFilePath);
+
+            // Create sanitized filename for display/reference
             const sanitizedName = path.basename(file.name)
-                .replace(/[<>:"/\\|?*]/g, '_') // Replace Windows-invalid characters
-                .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Remove emojis
+                .replace(/[<>:"/\\|?*]/g, '_')
+                .replace(/[\u{1F300}-\u{1F9FF}]/gu, '')
                 .trim();
 
-            const tempFilePath = path.join(tempDir, sanitizedName);
-            console.log('Temp file path:', tempFilePath);
-
-            // Copy file to temp directory using streams for better handling
-            try {
-                await new Promise<void>((resolve, reject) => {
-                    const readStream = fs.createReadStream(sourceFilePath);
-                    const writeStream = fs.createWriteStream(tempFilePath);
-
-                    readStream.on('error', (error) => {
-                        readStream.destroy();
-                        writeStream.destroy();
-                        reject(new Error(`Failed to read file: ${error.message}`));
-                    });
-
-                    writeStream.on('error', (error) => {
-                        readStream.destroy();
-                        writeStream.destroy();
-                        reject(new Error(`Failed to write file: ${error.message}`));
-                    });
-
-                    writeStream.on('finish', () => {
-                        resolve();
-                    });
-
-                    readStream.pipe(writeStream);
-                });
-
-                return {
-                    path: tempFilePath,
-                    filename: sanitizedName
-                };
-            } catch (error) {
-                if (error instanceof Error) {
-                    console.error('Copy error details:', {
-                        message: error.message,
-                        code: (error as any).code,
-                        errno: (error as any).errno
-                    });
-                    throw new Error(`Failed to copy file: ${error.message} (${(error as any).code})`);
-                }
-                throw error;
-            }
+            // Return the actual file path and sanitized name
+            return {
+                path: sourceFilePath,
+                filename: sanitizedName
+            };
         } catch (error) {
             console.error('Failed to get file:', error);
             throw error;
