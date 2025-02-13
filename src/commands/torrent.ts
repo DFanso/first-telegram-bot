@@ -163,21 +163,32 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             );
         }
 
+        // Sanitize file paths
+        const sanitizedSourcePath = decodeURIComponent(sourceFilePath).replace(/[\u{1F300}-\u{1F9FF}]/gu, '').trim();
+        
         // Verify file exists
-        if (!fs.existsSync(sourceFilePath)) {
-            throw new Error(`File not found at local path: ${sourceFilePath}`);
+        if (!fs.existsSync(sanitizedSourcePath)) {
+            throw new Error(`File not found at local path: ${sanitizedSourcePath}`);
         }
 
-        const fileName = path.basename(sourceFilePath);
+        const fileName = path.basename(sanitizedSourcePath)
+            .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Remove emojis
+            .replace(/[^\w\s\-\.]/g, '_') // Replace special chars with underscore
+            .trim();
         
-        // Create temp directory for processing if it doesn't exist
-        const tempDir = path.join(process.cwd(), 'temp');
-        if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir, { recursive: true });
+        // Create temp directory with elevated permissions
+        const tempDir = path.join(process.cwd(), 'temp', Date.now().toString());
+        try {
+            if (!fs.existsSync(tempDir)) {
+                fs.mkdirSync(tempDir, { recursive: true, mode: 0o777 });
+            }
+        } catch (mkdirError) {
+            console.error('Failed to create temp directory:', mkdirError);
+            throw new Error('Failed to create temporary directory. Please check folder permissions.');
         }
 
         // Get file size
-        const stats = await fs.promises.stat(sourceFilePath);
+        const stats = await fs.promises.stat(sanitizedSourcePath);
         const fileSize = stats.size;
         const PART_SIZE = 2 * 1024 * 1024 * 1024; // 2GB in bytes
 
@@ -198,37 +209,57 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                     let partNum = 1;
                     let processedBytes = 0;
 
-                    while (processedBytes < fs.statSync(sourceFilePath).size) {
-                        const archive = archiver('zip', { zlib: { level: 9 } });
-                        const partPath = path.join(tempDir, \`\${fileName}.part\${partNum}.zip\`);
-                        const output = fs.createWriteStream(partPath);
+                    try {
+                        while (processedBytes < fs.statSync(sourceFilePath).size) {
+                            const archive = archiver('zip', { zlib: { level: 9 } });
+                            const partPath = path.join(tempDir, \`\${fileName}.part\${partNum}.zip\`);
+                            const output = fs.createWriteStream(partPath, { mode: 0o666 });
 
-                        archive.pipe(output);
+                            archive.on('error', (err) => {
+                                throw err;
+                            });
 
-                        const currentPartSize = Math.min(PART_SIZE, fs.statSync(sourceFilePath).size - processedBytes);
-                        archive.append(fs.createReadStream(sourceFilePath, {
-                            start: processedBytes,
-                            end: processedBytes + currentPartSize - 1
-                        }), { name: fileName });
+                            archive.pipe(output);
 
-                        await archive.finalize();
-                        parts.push(partPath);
-                        processedBytes += currentPartSize;
-                        partNum++;
-                        
+                            const currentPartSize = Math.min(PART_SIZE, fs.statSync(sourceFilePath).size - processedBytes);
+                            archive.append(fs.createReadStream(sourceFilePath, {
+                                start: processedBytes,
+                                end: processedBytes + currentPartSize - 1,
+                                mode: 0o666
+                            }), { name: fileName });
+
+                            await archive.finalize();
+                            parts.push(partPath);
+                            processedBytes += currentPartSize;
+                            partNum++;
+                            
+                            parentPort.postMessage({ 
+                                type: 'progress', 
+                                progress: (processedBytes / fs.statSync(sourceFilePath).size) * 100 
+                            });
+                        }
+
+                        parentPort.postMessage({ type: 'complete', parts });
+                    } catch (error) {
                         parentPort.postMessage({ 
-                            type: 'progress', 
-                            progress: (processedBytes / fs.statSync(sourceFilePath).size) * 100 
+                            type: 'error', 
+                            error: \`Compression error: \${error.message}\` 
                         });
                     }
-
-                    parentPort.postMessage({ type: 'complete', parts });
                 }
 
                 compressAndSplit().catch(error => {
-                    parentPort.postMessage({ type: 'error', error: error.message });
+                    parentPort.postMessage({ 
+                        type: 'error', 
+                        error: \`Worker error: \${error.message}\` 
+                    });
                 });
-            `, { eval: true, workerData: { sourceFilePath, tempDir, PART_SIZE, fileName } });
+            `, { eval: true, workerData: { 
+                sourceFilePath: sanitizedSourcePath, 
+                tempDir, 
+                PART_SIZE, 
+                fileName 
+            }});
 
             // Handle worker messages
             worker.on('message', async (message) => {
@@ -240,12 +271,21 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                     
                     // Send each part
                     for (let i = 0; i < parts.length; i++) {
-                        const partPath = parts[i];
-                        await bot.sendDocument(chatId, partPath, {
-                            caption: `Part ${i + 1} of ${parts.length}: ${path.basename(partPath)}`
-                        });
-                        // Clean up part file after sending
-                        fs.unlinkSync(partPath);
+                        try {
+                            const partPath = parts[i];
+                            await bot.sendDocument(chatId, partPath, {
+                                caption: `Part ${i + 1} of ${parts.length}: ${path.basename(partPath)}`
+                            });
+                            // Clean up part file after sending
+                            try {
+                                fs.unlinkSync(partPath);
+                            } catch (unlinkError) {
+                                console.error(`Failed to delete part file ${partPath}:`, unlinkError);
+                            }
+                        } catch (sendError: any) {
+                            console.error(`Failed to send part ${i + 1}:`, sendError);
+                            throw new Error(`Failed to send part ${i + 1}: ${sendError?.message || 'Unknown error'}`);
+                        }
                     }
                     
                     await bot.sendMessage(chatId, '✅ All parts sent successfully!');
@@ -253,16 +293,25 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                     throw new Error(message.error);
                 }
             });
+
+            // Handle worker errors
+            worker.on('error', (error) => {
+                throw new Error(`Worker error: ${error.message}`);
+            });
         } else {
             // For files under 2GB, compress and send as single file
             await bot.sendMessage(chatId, '📦 Compressing file...');
             
             const zipPath = path.join(tempDir, `${fileName}.zip`);
-            const output = createWriteStream(zipPath);
+            const output = createWriteStream(zipPath, { mode: 0o666 });
             const archive = archiver('zip', { zlib: { level: 9 } });
             
+            archive.on('error', (err) => {
+                throw err;
+            });
+
             archive.pipe(output);
-            archive.file(sourceFilePath, { name: fileName });
+            archive.file(sanitizedSourcePath, { name: fileName });
             
             await archive.finalize();
             
@@ -272,12 +321,18 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             });
             
             // Clean up
-            fs.unlinkSync(zipPath);
+            try {
+                fs.unlinkSync(zipPath);
+            } catch (unlinkError) {
+                console.error('Failed to delete zip file:', unlinkError);
+            }
         }
 
-        // Clean up original file if needed
-        if (fs.existsSync(sourceFilePath)) {
-            fs.unlinkSync(sourceFilePath);
+        // Clean up temp directory
+        try {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        } catch (rmError) {
+            console.error('Failed to remove temp directory:', rmError);
         }
 
         await bot.sendMessage(chatId, '✅ File transfer completed successfully!');
