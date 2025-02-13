@@ -202,16 +202,32 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                     const totalSize = files.reduce((sum, f) => sum + fs.statSync(f.path).size, 0);
 
                     try {
+                        // Ensure temp directory exists
+                        await fs.promises.mkdir(tempDir, { recursive: true });
+
                         // Function to create new archive
                         function createNewArchive() {
                             const archive = archiver('zip', { zlib: { level: 9 } });
                             const partPath = path.join(tempDir, \`\${torrentName}.part\${partNum}.zip\`);
+                            
+                            // Ensure the directory exists before creating the write stream
+                            fs.mkdirSync(path.dirname(partPath), { recursive: true });
+                            
                             const output = fs.createWriteStream(partPath);
 
                             return new Promise((resolve, reject) => {
                                 output.on('close', () => resolve(partPath));
-                                archive.on('error', reject);
-                                archive.on('warning', console.warn);
+                                output.on('error', (err) => {
+                                    reject(new Error(\`Failed to write to \${partPath}: \${err.message}\`));
+                                });
+                                archive.on('error', (err) => {
+                                    reject(new Error(\`Archive error for \${partPath}: \${err.message}\`));
+                                });
+                                archive.on('warning', (err) => {
+                                    if (err.code !== 'ENOENT') {
+                                        console.warn(\`Archive warning: \${err.message}\`);
+                                    }
+                                });
                                 archive.pipe(output);
                             }).then(path => {
                                 parts.push(path);
@@ -226,6 +242,17 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
 
                         // Process each file
                         for (const file of files) {
+                            // Verify file exists and is readable before processing
+                            try {
+                                await fs.promises.access(file.path, fs.constants.R_OK);
+                            } catch (err) {
+                                parentPort.postMessage({ 
+                                    type: 'warning', 
+                                    message: \`Skipping inaccessible file \${file.filename}: \${err.message}\` 
+                                });
+                                continue;
+                            }
+
                             const stats = fs.statSync(file.path);
                             
                             // If single file is larger than part size, need to split it
@@ -287,6 +314,8 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                         chatId, 
                         `📦 Creating archive part ${message.currentPart}, overall progress: ${Math.round(message.progress)}%`
                     );
+                } else if (message.type === 'warning') {
+                    await bot.sendMessage(chatId, `⚠️ ${message.message}`);
                 } else if (message.type === 'complete') {
                     const parts = message.parts;
                     await bot.sendMessage(chatId, `✅ Created ${parts.length} archive parts. Sending files...`);
@@ -299,8 +328,8 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                                 caption: `${torrentName} - Part ${i + 1} of ${parts.length}`
                             });
                         } catch (sendError: any) {
-                            console.error(`Failed to send part ${i + 1}:`, sendError);
-                            throw new Error(`Failed to send part ${i + 1}: ${sendError?.message || 'Unknown error'}`);
+                            console.error(\`Failed to send part \${i + 1}:\`, sendError);
+                            throw new Error(\`Failed to send part \${i + 1}: \${sendError?.message || 'Unknown error'}\`);
                         }
                     }
                     
