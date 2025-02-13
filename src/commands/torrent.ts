@@ -11,6 +11,29 @@ import { pipeline } from 'stream/promises';
 import { createReadStream, createWriteStream } from 'fs';
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 
+// Utility functions
+function formatSpeed(bytes: number): string {
+    const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+    let speed = bytes;
+    let unitIndex = 0;
+    while (speed >= 1024 && unitIndex < units.length - 1) {
+        speed /= 1024;
+        unitIndex++;
+    }
+    return `${speed.toFixed(2)} ${units[unitIndex]}`;
+}
+
+function formatSize(bytes: number): string {
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let size = bytes;
+    let unitIndex = 0;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+        size /= 1024;
+        unitIndex++;
+    }
+    return `${size.toFixed(2)} ${units[unitIndex]}`;
+}
+
 // Store user states and torrent info
 const userStates = new Map<number, 'waiting_for_magnet'>();
 const torrentProgress = new Map<string, { chatId: number, messageId: number }>();
@@ -328,8 +351,8 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                                 caption: `${torrentName} - Part ${i + 1} of ${parts.length}`
                             });
                         } catch (sendError: any) {
-                            console.error(\`Failed to send part \${i + 1}:\`, sendError);
-                            throw new Error(\`Failed to send part \${i + 1}: \${sendError?.message || 'Unknown error'}\`);
+                            console.error(`Failed to send part ${i + 1}:`, sendError);
+                            throw new Error(`Failed to send part ${i + 1}: ${sendError?.message || 'Unknown error'}`);
                         }
                     }
                     
@@ -383,9 +406,10 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
         await bot.sendMessage(chatId, '✅ All files processed successfully!');
     } catch (error) {
         console.error('Error handling completed torrent:', error);
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         await bot.sendMessage(
             chatId, 
-            `❌ Failed to process files: ${error instanceof Error ? error.message : 'Unknown error'}\n` +
+            '❌ Failed to process files: ' + errorMessage + '\n' +
             'The files are still available in qBittorrent if you want to try again.'
         );
     } finally {
@@ -398,29 +422,6 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
             }
         }
     }
-}
-
-// Utility functions
-function formatSpeed(bytes: number): string {
-    const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-    let speed = bytes;
-    let unitIndex = 0;
-    while (speed >= 1024 && unitIndex < units.length - 1) {
-        speed /= 1024;
-        unitIndex++;
-    }
-    return `${speed.toFixed(2)} ${units[unitIndex]}`;
-}
-
-function formatSize(bytes: number): string {
-    const units = ['B', 'KB', 'MB', 'GB'];
-    let size = bytes;
-    let unitIndex = 0;
-    while (size >= 1024 && unitIndex < units.length - 1) {
-        size /= 1024;
-        unitIndex++;
-    }
-    return `${size.toFixed(2)} ${units[unitIndex]}`;
 }
 
 export const torrentCommand: Command = {
