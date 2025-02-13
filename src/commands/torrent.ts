@@ -159,186 +159,196 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
         tempDir = path.join(process.env.TEMP || process.env.TMP || path.join(process.cwd(), 'temp'), 'telegram-bot', Date.now().toString());
         await fs.promises.mkdir(tempDir, { recursive: true });
 
-        // Process each file
+        // Calculate total size of all files
+        let totalSize = 0;
+        const accessibleFiles = [];
         for (const fileInfo of files) {
             try {
-                // Verify file exists and is accessible
-                try {
-                    await fs.promises.access(fileInfo.path, fs.constants.R_OK);
-                } catch (accessError) {
-                    console.error('File access error:', accessError);
-                    await bot.sendMessage(chatId, `⚠️ Skipping inaccessible file: ${fileInfo.filename}`);
-                    continue;
-                }
-
-                // Get file size
+                await fs.promises.access(fileInfo.path, fs.constants.R_OK);
                 const stats = await fs.promises.stat(fileInfo.path);
-                const fileSize = stats.size;
-                const PART_SIZE = 2 * 1024 * 1024 * 1024; // 2GB in bytes
+                totalSize += stats.size;
+                accessibleFiles.push(fileInfo);
+            } catch (accessError) {
+                console.error('File access error:', accessError);
+                await bot.sendMessage(chatId, `⚠️ Skipping inaccessible file: ${fileInfo.filename}`);
+            }
+        }
 
-                // If file is larger than 2GB, split into parts
-                if (fileSize > PART_SIZE) {
-                    await bot.sendMessage(chatId, `📦 File "${fileInfo.filename}" is larger than 2GB. Splitting and compressing into parts...`);
-                    
-                    // Create a worker for compression and splitting
-                    const worker = new Worker(`
-                        const { parentPort, workerData } = require('worker_threads');
-                        const fs = require('fs');
-                        const archiver = require('archiver');
-                        const path = require('path');
+        if (accessibleFiles.length === 0) {
+            throw new Error('No accessible files found in torrent');
+        }
 
-                        async function compressAndSplit() {
-                            const { sourceFilePath, tempDir, PART_SIZE, fileName } = workerData;
+        const PART_SIZE = 2 * 1024 * 1024 * 1024; // 2GB in bytes
+        const torrentName = torrent.name.replace(/[<>:"/\\|?*]/g, '_').replace(/[\u{1F300}-\u{1F9FF}]/gu, '').trim();
 
-                            // Ensure source file is readable
-                            try {
-                                await fs.promises.access(sourceFilePath, fs.constants.R_OK);
-                            } catch (error) {
-                                throw new Error(\`Cannot read source file: \${error.message}\`);
-                            }
+        // If total size is larger than 2GB, split into parts
+        if (totalSize > PART_SIZE) {
+            await bot.sendMessage(chatId, '📦 Total size is larger than 2GB. Creating split archives...');
+            
+            // Create a worker for compression and splitting
+            const worker = new Worker(`
+                const { parentPort, workerData } = require('worker_threads');
+                const fs = require('fs');
+                const archiver = require('archiver');
+                const path = require('path');
 
-                            try {
-                                const fileSize = (await fs.promises.stat(sourceFilePath)).size;
-                                const numParts = Math.ceil(fileSize / PART_SIZE);
-                                const parts = [];
+                async function compressFiles() {
+                    const { files, tempDir, PART_SIZE, torrentName } = workerData;
+                    let currentArchive = null;
+                    let currentSize = 0;
+                    let partNum = 1;
+                    const parts = [];
+                    let totalProcessed = 0;
+                    const totalSize = files.reduce((sum, f) => sum + fs.statSync(f.path).size, 0);
 
-                                for (let partNum = 1; partNum <= numParts; partNum++) {
-                                    const start = (partNum - 1) * PART_SIZE;
-                                    const end = Math.min(partNum * PART_SIZE, fileSize) - 1;
-                                    const partPath = path.join(tempDir, \`\${fileName}.part\${partNum}.zip\`);
-
-                                    const archive = archiver('zip', { zlib: { level: 9 } });
-                                    const output = fs.createWriteStream(partPath);
-
-                                    await new Promise((resolve, reject) => {
-                                        output.on('close', resolve);
-                                        archive.on('error', reject);
-                                        archive.on('warning', console.warn);
-
-                                        archive.pipe(output);
-
-                                        const readStream = fs.createReadStream(sourceFilePath, { 
-                                            start, 
-                                            end,
-                                            highWaterMark: 64 * 1024 // 64KB chunks
-                                        });
-
-                                        archive.append(readStream, { 
-                                            name: fileName,
-                                            mode: 0o666
-                                        });
-
-                                        archive.finalize();
-                                    });
-
-                                    parts.push(partPath);
-                                    parentPort.postMessage({ 
-                                        type: 'progress', 
-                                        progress: (end + 1) / fileSize * 100,
-                                        part: partNum,
-                                        total: numParts
-                                    });
-                                }
-
-                                parentPort.postMessage({ type: 'complete', parts });
-                            } catch (error) {
-                                parentPort.postMessage({ 
-                                    type: 'error', 
-                                    error: \`Compression error: \${error.message}\` 
-                                });
-                            }
-                        }
-
-                        compressAndSplit().catch(error => {
-                            parentPort.postMessage({ 
-                                type: 'error', 
-                                error: \`Worker error: \${error.message}\` 
-                            });
-                        });
-                    `, { eval: true, workerData: { 
-                        sourceFilePath: fileInfo.path, 
-                        tempDir, 
-                        PART_SIZE, 
-                        fileName: fileInfo.filename 
-                    }});
-
-                    // Handle worker messages
-                    worker.on('message', async (message) => {
-                        if (message.type === 'progress') {
-                            await bot.sendMessage(
-                                chatId, 
-                                `📦 Compressing "${fileInfo.filename}" part ${message.part}/${message.total}: ${Math.round(message.progress)}%`
-                            );
-                        } else if (message.type === 'complete') {
-                            const parts = message.parts;
-                            await bot.sendMessage(chatId, `✅ File "${fileInfo.filename}" split and compressed into ${parts.length} parts. Sending files...`);
-                            
-                            // Send each part
-                            for (let i = 0; i < parts.length; i++) {
-                                try {
-                                    const partPath = parts[i];
-                                    await bot.sendDocument(chatId, partPath, {
-                                        caption: `${fileInfo.filename} - Part ${i + 1} of ${parts.length}`
-                                    });
-                                } catch (sendError: any) {
-                                    console.error(`Failed to send part ${i + 1}:`, sendError);
-                                    throw new Error(`Failed to send part ${i + 1}: ${sendError?.message || 'Unknown error'}`);
-                                }
-                            }
-                            
-                            await bot.sendMessage(chatId, `✅ All parts of "${fileInfo.filename}" sent successfully!`);
-                        } else if (message.type === 'error') {
-                            throw new Error(message.error);
-                        }
-                    });
-
-                    // Handle worker errors
-                    worker.on('error', (error) => {
-                        throw new Error(`Worker error: ${error.message}`);
-                    });
-                } else {
-                    // For files under 2GB, try to send directly first
                     try {
-                        await bot.sendMessage(chatId, `📤 Sending file "${fileInfo.filename}"...`);
-                        await bot.sendDocument(chatId, fileInfo.path, {
-                            caption: fileInfo.filename
-                        });
-                    } catch (sendError) {
-                        // If direct send fails, try compressing
-                        console.log('Direct send failed, trying compression:', sendError);
-                        await bot.sendMessage(chatId, `📦 Compressing "${fileInfo.filename}"...`);
-                        
-                        const zipPath = path.join(tempDir, `${fileInfo.filename}.zip`);
-                        const output = createWriteStream(zipPath);
-                        const archive = archiver('zip', { zlib: { level: 9 } });
-                        
-                        archive.on('error', (err) => {
-                            throw err;
-                        });
+                        // Function to create new archive
+                        function createNewArchive() {
+                            const archive = archiver('zip', { zlib: { level: 9 } });
+                            const partPath = path.join(tempDir, \`\${torrentName}.part\${partNum}.zip\`);
+                            const output = fs.createWriteStream(partPath);
 
-                        archive.pipe(output);
-                        archive.file(fileInfo.path, { 
-                            name: fileInfo.filename,
-                            mode: 0o666
-                        });
-                        
-                        await archive.finalize();
-                        
-                        await bot.sendMessage(chatId, `📤 Sending compressed file "${fileInfo.filename}"...`);
-                        await bot.sendDocument(chatId, zipPath, {
-                            caption: `${fileInfo.filename}.zip`
+                            return new Promise((resolve, reject) => {
+                                output.on('close', () => resolve(partPath));
+                                archive.on('error', reject);
+                                archive.on('warning', console.warn);
+                                archive.pipe(output);
+                            }).then(path => {
+                                parts.push(path);
+                                partNum++;
+                                currentSize = 0;
+                                return archive;
+                            });
+                        }
+
+                        // Create first archive
+                        currentArchive = await createNewArchive();
+
+                        // Process each file
+                        for (const file of files) {
+                            const stats = fs.statSync(file.path);
+                            
+                            // If single file is larger than part size, need to split it
+                            if (stats.size > PART_SIZE) {
+                                throw new Error(\`File \${file.filename} is too large (\${stats.size} bytes) to process\`);
+                            }
+
+                            // If current archive would exceed part size, create new one
+                            if (currentSize + stats.size > PART_SIZE) {
+                                await currentArchive.finalize();
+                                currentArchive = await createNewArchive();
+                            }
+
+                            // Add file to current archive
+                            currentArchive.file(file.path, { name: file.filename });
+                            currentSize += stats.size;
+                            totalProcessed += stats.size;
+
+                            // Report progress
+                            parentPort.postMessage({ 
+                                type: 'progress',
+                                progress: (totalProcessed / totalSize) * 100,
+                                currentPart: partNum - 1,
+                                totalFiles: files.length
+                            });
+                        }
+
+                        // Finalize last archive
+                        if (currentArchive) {
+                            await currentArchive.finalize();
+                        }
+
+                        parentPort.postMessage({ type: 'complete', parts });
+                    } catch (error) {
+                        parentPort.postMessage({ 
+                            type: 'error', 
+                            error: \`Compression error: \${error.message}\` 
                         });
                     }
                 }
-            } catch (fileError) {
-                console.error(`Error processing file ${fileInfo.filename}:`, fileError);
-                await bot.sendMessage(
-                    chatId,
-                    `⚠️ Failed to process file "${fileInfo.filename}": ${fileError instanceof Error ? fileError.message : 'Unknown error'}`
-                );
-                // Continue with next file
-                continue;
+
+                compressFiles().catch(error => {
+                    parentPort.postMessage({ 
+                        type: 'error', 
+                        error: \`Worker error: \${error.message}\` 
+                    });
+                });
+            `, { eval: true, workerData: { 
+                files: accessibleFiles,
+                tempDir, 
+                PART_SIZE,
+                torrentName
+            }});
+
+            // Handle worker messages
+            worker.on('message', async (message) => {
+                if (message.type === 'progress') {
+                    await bot.sendMessage(
+                        chatId, 
+                        `📦 Creating archive part ${message.currentPart}, overall progress: ${Math.round(message.progress)}%`
+                    );
+                } else if (message.type === 'complete') {
+                    const parts = message.parts;
+                    await bot.sendMessage(chatId, `✅ Created ${parts.length} archive parts. Sending files...`);
+                    
+                    // Send each part
+                    for (let i = 0; i < parts.length; i++) {
+                        try {
+                            const partPath = parts[i];
+                            await bot.sendDocument(chatId, partPath, {
+                                caption: `${torrentName} - Part ${i + 1} of ${parts.length}`
+                            });
+                        } catch (sendError: any) {
+                            console.error(`Failed to send part ${i + 1}:`, sendError);
+                            throw new Error(`Failed to send part ${i + 1}: ${sendError?.message || 'Unknown error'}`);
+                        }
+                    }
+                    
+                    await bot.sendMessage(chatId, '✅ All archive parts sent successfully!');
+                } else if (message.type === 'error') {
+                    throw new Error(message.error);
+                }
+            });
+
+            // Handle worker errors
+            worker.on('error', (error) => {
+                throw new Error(`Worker error: ${error.message}`);
+            });
+        } else {
+            // For total size under 2GB, create single archive
+            await bot.sendMessage(chatId, '📦 Creating archive of all files...');
+            
+            const zipPath = path.join(tempDir, `${torrentName}.zip`);
+            const output = createWriteStream(zipPath);
+            const archive = archiver('zip', { zlib: { level: 9 } });
+            
+            archive.on('error', (err) => {
+                throw err;
+            });
+
+            // Set up progress handling
+            archive.on('progress', (progress) => {
+                if (progress.entries.processed % 10 === 0) { // Update every 10 files
+                    bot.sendMessage(
+                        chatId,
+                        `📦 Archived ${progress.entries.processed} of ${progress.entries.total} files...`
+                    ).catch(console.error);
+                }
+            });
+
+            archive.pipe(output);
+
+            // Add all files to archive
+            for (const fileInfo of accessibleFiles) {
+                archive.file(fileInfo.path, { name: fileInfo.filename });
             }
+            
+            await archive.finalize();
+            
+            await bot.sendMessage(chatId, '📤 Sending archive...');
+            await bot.sendDocument(chatId, zipPath, {
+                caption: `${torrentName}.zip`
+            });
         }
 
         await bot.sendMessage(chatId, '✅ All files processed successfully!');
