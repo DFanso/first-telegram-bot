@@ -23,6 +23,7 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
+    "@distube/ytdl-core": "^4.16.3",
     "@types/archiver": "^6.0.3",
     "@types/form-data": "^2.5.2",
     "@types/uuid": "^10.0.0",
@@ -31,6 +32,7 @@
     "dotenv": "^16.4.7",
     "form-data": "^4.0.1",
     "node-telegram-bot-api": "^0.66.0",
+    "nodejs-file-downloader": "^4.13.0",
     "qbittorrent-api": "^1.0.0",
     "uuid": "^11.0.5"
   }
