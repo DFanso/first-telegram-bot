@@ -274,10 +274,36 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
         // For single files under 1.8GB, send directly
         if (accessibleFiles.length === 1 && accessibleFiles[0].size < MAX_ARCHIVE_SIZE) {
             const file = accessibleFiles[0];
-            await bot.sendMessage(chatId, `📤 Sending file directly: ${file.filename} (${formatSize(file.size)})...`);
-            await bot.sendDocument(chatId, file.path, {
+            const progressMsg = await bot.sendMessage(chatId, `📤 Preparing to send: ${file.filename}...`);
+            
+            // Create a read stream for the file
+            const fileStream = createReadStream(file.path);
+            let uploadedBytes = 0;
+            const totalBytes = file.size;
+            let lastUpdate = 0;
+
+            // Track upload progress
+            fileStream.on('data', (chunk) => {
+                uploadedBytes += chunk.length;
+                const now = Date.now();
+                if (now - lastUpdate >= PROGRESS_UPDATE_INTERVAL) {
+                    const progress = Math.round((uploadedBytes / totalBytes) * 100);
+                    const progressBar = '█'.repeat(Math.floor(progress / 5)) + '░'.repeat(20 - Math.floor(progress / 5));
+                    updateProgress(bot, chatId, progressMsg.message_id,
+                        `📤 Uploading file: ${file.filename}\n` +
+                        `${progressBar} ${progress}%\n` +
+                        `Uploaded: ${formatSize(uploadedBytes)} / ${formatSize(totalBytes)}`
+                    );
+                    lastUpdate = now;
+                }
+            });
+
+            await bot.sendDocument(chatId, fileStream, {
                 caption: file.filename
             });
+
+            // Delete progress message
+            await bot.deleteMessage(chatId, progressMsg.message_id);
             await bot.sendMessage(chatId, '✅ File sent successfully!');
             return;
         }
@@ -442,7 +468,46 @@ async function createAndSendArchive(
         `📤 Sending archive part ${partNumber} of ${totalParts} (${formatSize(stats.size)})...`
     );
 
-    await bot.sendDocument(chatId, zipPath, {
+    // Create a read stream for the file
+    const fileStream = createReadStream(zipPath);
+    let uploadedBytes = 0;
+    const totalBytes = stats.size;
+
+    // Track upload progress
+    fileStream.on('data', (chunk) => {
+        uploadedBytes += chunk.length;
+        const now = Date.now();
+        if (now - lastUpdate >= PROGRESS_UPDATE_INTERVAL) {
+            const progress = Math.round((uploadedBytes / totalBytes) * 100);
+            const progressBar = '█'.repeat(Math.floor(progress / 5)) + '░'.repeat(20 - Math.floor(progress / 5));
+            updateProgress(bot, chatId, progressMsg.message_id,
+                `📤 Uploading archive part ${partNumber} of ${totalParts}\n` +
+                `${progressBar} ${progress}%\n` +
+                `Uploaded: ${formatSize(uploadedBytes)} / ${formatSize(totalBytes)}`
+            );
+            lastUpdate = now;
+        }
+    });
+
+    fileStream.on('end', () => {
+        // Ensure we show 100% progress when done
+        updateProgress(bot, chatId, progressMsg.message_id,
+            `📤 Uploading archive part ${partNumber} of ${totalParts}\n` +
+            `████████████████████ 100%\n` +
+            `Uploaded: ${formatSize(totalBytes)} / ${formatSize(totalBytes)}`
+        );
+    });
+
+    fileStream.on('error', async (error) => {
+        console.error('Error during file upload:', error);
+        await updateProgress(bot, chatId, progressMsg.message_id,
+            `❌ Error uploading file: ${error.message}`
+        );
+        throw error;
+    });
+
+    // Send the file with the stream
+    await bot.sendDocument(chatId, fileStream, {
         caption: `${archiveName} (Part ${partNumber} of ${totalParts})`
     });
 
