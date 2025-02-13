@@ -153,7 +153,21 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
         
         // Get the file from qBittorrent
         const fileInfo = await qbittorrent.downloadFile(torrent.hash);
-        const sourceFilePath = fileInfo.path;
+        
+        // Convert network path to local path if needed
+        let sourceFilePath = fileInfo.path;
+        if (config.QBITTORRENT_NETWORK_PATH && config.QBITTORRENT_DOWNLOAD_PATH) {
+            sourceFilePath = sourceFilePath.replace(
+                config.QBITTORRENT_NETWORK_PATH,
+                path.resolve(config.QBITTORRENT_DOWNLOAD_PATH)
+            );
+        }
+
+        // Verify file exists
+        if (!fs.existsSync(sourceFilePath)) {
+            throw new Error(`File not found at local path: ${sourceFilePath}`);
+        }
+
         const fileName = path.basename(sourceFilePath);
         
         // Create temp directory for processing if it doesn't exist
