@@ -202,8 +202,15 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
         }
 
         // Set size limits
-        const PART_SIZE = 1.8 * 1024 * 1024 * 1024; // 1.8GB in bytes
+        const PART_SIZE = 1.5 * 1024 * 1024 * 1024; // 1.5GB in bytes to be extra safe
         const torrentName = torrent.name.replace(/[<>:"/\\|?*]/g, '_').replace(/[\u{1F300}-\u{1F9FF}]/gu, '').trim();
+
+        // Sort files by size in descending order to handle large files first
+        accessibleFiles.sort((a, b) => {
+            const statsA = fs.statSync(a.path);
+            const statsB = fs.statSync(b.path);
+            return statsB.size - statsA.size;
+        });
 
         // If total size is larger than the part size limit, split into parts
         if (totalSize > PART_SIZE) {
@@ -218,7 +225,7 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 // Function to create new archive
                 const createNewArchive = () => {
                     const archive = archiver('zip', { 
-                        zlib: { level: 9 },
+                        zlib: { level: 6 }, // Lower compression level for better stability
                         store: false // Use compression
                     });
                     const partPath = path.join(tempDir!, `${torrentName}.part${partNum}.zip`);
@@ -234,16 +241,6 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                         }
                     });
 
-                    // Monitor archive size
-                    let archiveSize = 0;
-                    archive.on('data', (chunk) => {
-                        archiveSize += chunk.length;
-                        if (archiveSize > PART_SIZE) {
-                            archive.abort();
-                            throw new Error(`Archive part ${partNum} exceeded size limit of ${formatSize(PART_SIZE)}`);
-                        }
-                    });
-
                     archive.pipe(output);
 
                     return {
@@ -251,12 +248,6 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                         partPath,
                         finalize: () => new Promise<void>((resolve, reject) => {
                             output.on('close', () => {
-                                // Verify the final file size
-                                const stats = fs.statSync(partPath);
-                                if (stats.size > PART_SIZE) {
-                                    reject(new Error(`Archive part ${partNum} is too large (${formatSize(stats.size)}). Limit is ${formatSize(PART_SIZE)}`));
-                                    return;
-                                }
                                 parts.push(partPath);
                                 resolve();
                             });
@@ -274,27 +265,26 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 for (const fileInfo of accessibleFiles) {
                     const stats = await fs.promises.stat(fileInfo.path);
                     
-                    // If current archive would exceed size limit, create new one
-                    if (currentSize + Math.ceil(stats.size * 0.9) > PART_SIZE * 0.95) { // Leave 5% buffer for zip overhead
-                        // Only finalize if we have added files
-                        if (currentSize > 0) {
-                            await archiveInfo.finalize();
-                            partNum++;
-                            archiveInfo = createNewArchive();
-                            currentArchive = archiveInfo.archive;
-                            currentSize = 0;
-                            await bot.sendMessage(chatId, `📦 Creating archive part ${partNum}...`);
-                        }
+                    // Use more conservative compression estimate (assume only 20% compression)
+                    const estimatedCompressedSize = Math.ceil(stats.size * 0.8);
+                    
+                    // If current archive would exceed size limit or this is a large file, create new one
+                    if (currentSize > 0 && (currentSize + estimatedCompressedSize > PART_SIZE * 0.9)) { // Leave 10% buffer
+                        await archiveInfo.finalize();
+                        partNum++;
+                        archiveInfo = createNewArchive();
+                        currentArchive = archiveInfo.archive;
+                        currentSize = 0;
+                        await bot.sendMessage(chatId, `📦 Creating archive part ${partNum}...`);
                     }
 
                     // Add file to current archive
                     currentArchive.file(fileInfo.path, { name: fileInfo.filename });
-                    currentSize += Math.ceil(stats.size * 0.9); // Estimate compressed size
+                    currentSize += estimatedCompressedSize;
 
-                    // Report progress every few files
-                    if (partNum === 1 && accessibleFiles.length > 10) {
-                        const progress = Math.round((currentSize / PART_SIZE) * 100);
-                        await bot.sendMessage(chatId, `📦 Part ${partNum}: ${progress}% (${formatSize(currentSize)} / ${formatSize(PART_SIZE)})`);
+                    // Report progress for large files
+                    if (stats.size > 100 * 1024 * 1024) { // Report for files over 100MB
+                        await bot.sendMessage(chatId, `📦 Adding ${fileInfo.filename} (${formatSize(stats.size)}) to part ${partNum}...`);
                     }
                 }
 
@@ -333,7 +323,7 @@ async function handleCompletedTorrent(torrent: any, bot: TelegramBot, chatId: nu
                 }
             }
         } else {
-            // For total size under 1.8GB, create single archive
+            // For total size under 1.5GB, create single archive
             await bot.sendMessage(chatId, '📦 Creating archive of all files...');
             
             const zipPath = path.join(tempDir, `${torrentName}.zip`);
